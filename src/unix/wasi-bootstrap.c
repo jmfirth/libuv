@@ -65,18 +65,19 @@
 
 #include <errno.h>
 #include <stdlib.h> /* abort */
+#include <string.h> /* memcmp, memset */
 #include <signal.h>
+#include <sys/socket.h> /* socketpair */
 
 /* ========================================================================
  * Process title / threadpool cleanup
+ *
+ * Both are provided by the existing portable files already in the WASI
+ * source list:
+ *   - uv__process_title_cleanup — src/unix/no-proctitle.c
+ *   - uv__threadpool_cleanup    — src/threadpool.c
+ * We don't re-stub them here to avoid duplicate-symbol errors at link.
  * ======================================================================== */
-
-void uv__process_title_cleanup(void) {
-}
-
-
-void uv__threadpool_cleanup(void) {
-}
 
 
 /* ========================================================================
@@ -99,14 +100,9 @@ void uv__udp_finish_close(uv_udp_t* handle) {
 /* ========================================================================
  * fs-poll (stat-polling fallback)
  *
- * Provide the close hook so uv_close() on a uv_fs_poll_t compiles. v1
- * callers should not instantiate fs-poll handles; if they do, the
- * cleanup path is a no-op and the handle is merely freed by the
- * generic uv_close machinery.
+ * Provided by src/fs-poll.c (portable, already in the source list); do
+ * not re-stub here or we hit a duplicate-symbol link error.
  * ======================================================================== */
-
-void uv__fs_poll_close(uv_fs_poll_t* handle) {
-}
 
 
 /* ========================================================================
@@ -142,21 +138,12 @@ void uv__async_stop(uv_loop_t* loop) {
 /* ========================================================================
  * Threadpool / work queue
  *
- * CMake-bootstrap aborts inside uv__work_submit because its bootstrap
- * build never invokes the threadpool. Our WASI v1 is the same. If a
- * call sneaks through, we prefer a visible trap to silent hangs.
+ * Provided by src/threadpool.c (portable, already in the source list).
+ * We don't re-stub uv__work_submit / uv__work_done here — doing so
+ * would produce duplicate-symbol link errors. If the threadpool code
+ * path is exercised at runtime it'll try to spawn worker threads; our
+ * v1 scope (CMake bootstrap subset) does not exercise this path.
  * ======================================================================== */
-
-void uv__work_submit(uv_loop_t* loop, struct uv__work* w,
-                     enum uv__work_kind kind,
-                     void (*work)(struct uv__work* w),
-                     void (*done)(struct uv__work* w, int status)) {
-  abort();
-}
-
-
-void uv__work_done(uv_async_t* handle) {
-}
 
 
 /* ========================================================================
@@ -247,3 +234,159 @@ void uv_once(uv_once_t* guard, void (*callback)(void)) {
   *guard = 1;
   callback();
 }
+
+
+/* ========================================================================
+ * Condvars / thread join — referenced by src/threadpool.c
+ *
+ * The threadpool file is in libuv's portable source list, so it ends
+ * up in our archive even though we don't exercise the threadpool in
+ * bootstrap-scope consumers. Link-time references from dead paths have
+ * to resolve; single-threaded no-ops are sufficient.
+ * ======================================================================== */
+
+int uv_cond_init(uv_cond_t* cond) {
+  return 0;
+}
+
+
+void uv_cond_destroy(uv_cond_t* cond) {
+}
+
+
+void uv_cond_signal(uv_cond_t* cond) {
+}
+
+
+void uv_cond_broadcast(uv_cond_t* cond) {
+}
+
+
+void uv_cond_wait(uv_cond_t* cond, uv_mutex_t* mutex) {
+}
+
+
+int uv_cond_timedwait(uv_cond_t* cond, uv_mutex_t* mutex, uint64_t timeout) {
+  return UV_ENOSYS;
+}
+
+
+int uv_thread_join(uv_thread_t* tid) {
+  return 0;
+}
+
+
+int uv_thread_create(uv_thread_t* tid, void (*entry)(void* arg), void* arg) {
+  (void) tid;
+  (void) entry;
+  (void) arg;
+  return UV_ENOSYS;
+}
+
+
+int uv_thread_create_ex(uv_thread_t* tid,
+                        const uv_thread_options_t* params,
+                        void (*entry)(void* arg),
+                        void* arg) {
+  (void) tid;
+  (void) params;
+  (void) entry;
+  (void) arg;
+  return UV_ENOSYS;
+}
+
+
+int uv_thread_detach(uv_thread_t* tid) {
+  (void) tid;
+  return 0;
+}
+
+
+uv_thread_t uv_thread_self(void) {
+  uv_thread_t t;
+  /* zero-initialize; comparison via uv_thread_equal returns true only
+   * against another zero value, which on WASI is fine because we never
+   * have more than one thread. */
+#ifdef __wasi__
+  /* uv_thread_t is pthread_t on Unix; wasix-libc uses a struct/pointer.
+   * Just return a zero-initialized value. */
+  memset(&t, 0, sizeof(t));
+#else
+  t = (uv_thread_t){0};
+#endif
+  return t;
+}
+
+
+int uv_thread_equal(const uv_thread_t* t1, const uv_thread_t* t2) {
+  return memcmp(t1, t2, sizeof(*t1)) == 0;
+}
+
+
+/* ========================================================================
+ * TCP / poll / socketpair — referenced by core.c / stream.c / process.c
+ *
+ * These are defined in tcp.c / poll.c which we deliberately exclude
+ * from the WASI source set. The references are in dead code paths
+ * (no TCP handles get initialized), but wasm-ld still needs
+ * resolution. Stub with UV_ENOSYS.
+ * ======================================================================== */
+
+void uv__tcp_close(uv_tcp_t* handle) {
+  (void) handle;
+}
+
+
+int uv__tcp_nodelay(int fd, int on) {
+  (void) fd;
+  (void) on;
+  return UV_ENOSYS;
+}
+
+
+int uv__tcp_keepalive(int fd, int on, unsigned int delay) {
+  (void) fd;
+  (void) on;
+  (void) delay;
+  return UV_ENOSYS;
+}
+
+
+void uv__poll_close(uv_poll_t* handle) {
+  (void) handle;
+}
+
+
+/* uv_socketpair wraps socketpair(2). wasix-libc has socketpair; this
+ * real implementation is useful because libuv's uv_pipe(fds, flags)
+ * on some platforms delegates to uv_socketpair for SOCK_STREAM pipes.
+ * For WASI v1 we gate it behind a trivial wrapper that forwards.
+ */
+int uv_socketpair(int type, int protocol, uv_os_sock_t fds[2], int flags0, int flags1) {
+  int sv[2];
+  (void) flags0;
+  (void) flags1;
+  if (socketpair(AF_UNIX, type, protocol, sv) != 0)
+    return UV__ERR(errno);
+  fds[0] = sv[0];
+  fds[1] = sv[1];
+  return 0;
+}
+
+
+/* uv__fs_copy_file_range: Linux-only fast-path used by uv_fs_copyfile.
+ * wasix-libc does not expose copy_file_range. Return ENOSYS so libuv's
+ * fallback (read+write loop) kicks in. Only referenced under
+ * __linux__ / __FreeBSD__ guards in libuv, but let's provide a safe
+ * fallback just in case.
+ */
+#if defined(__linux__) || defined(__FreeBSD__)
+ssize_t uv__fs_copy_file_range(int fd_in, off_t* off_in,
+                               int fd_out, off_t* off_out,
+                               size_t len, unsigned int flags) {
+  (void) fd_in; (void) off_in; (void) fd_out; (void) off_out;
+  (void) len; (void) flags;
+  errno = ENOSYS;
+  return -1;
+}
+#endif
