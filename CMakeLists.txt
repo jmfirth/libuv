@@ -227,31 +227,41 @@ if(WIN32)
   list(APPEND uv_test_sources src/win/snprintf.c test/runner-win.c)
 else()
   list(APPEND uv_defines _FILE_OFFSET_BITS=64 _LARGEFILE_SOURCE)
-  if(NOT CMAKE_SYSTEM_NAME MATCHES "Android|OS390|QNX")
+  if(NOT CMAKE_SYSTEM_NAME MATCHES "Android|OS390|QNX|WASI")
     # TODO: This should be replaced with find_package(Threads) if possible
     # Android has pthread as part of its c library, not as a separate
     # libpthread.so.
+    # WASI: pthreads are part of wasi-libc/wasix-libc (linked via
+    # --target=wasm32-wasi-threads), not a separate -lpthread.
     list(APPEND uv_libraries pthread)
   endif()
-  list(APPEND uv_sources
-       src/unix/async.c
-       src/unix/core.c
-       src/unix/dl.c
-       src/unix/fs.c
-       src/unix/getaddrinfo.c
-       src/unix/getnameinfo.c
-       src/unix/loop-watcher.c
-       src/unix/loop.c
-       src/unix/pipe.c
-       src/unix/poll.c
-       src/unix/process.c
-       src/unix/random-devurandom.c
-       src/unix/signal.c
-       src/unix/stream.c
-       src/unix/tcp.c
-       src/unix/thread.c
-       src/unix/tty.c
-       src/unix/udp.c)
+  # Source set used by most unix targets. The WASI branch below uses a
+  # reduced subset (the CMake-bootstrap-style scope) because several of
+  # these files pull in APIs WASI/WASIX either doesn't have at all (dl,
+  # getaddrinfo in a thread, udp) or that v1 deliberately stubs out
+  # (async, thread, tcp). See src/unix/wasi-bootstrap.c for stub
+  # rationale and .claude/plans/libuv-wasix-port.md for the full scope.
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "WASI")
+    list(APPEND uv_sources
+         src/unix/async.c
+         src/unix/core.c
+         src/unix/dl.c
+         src/unix/fs.c
+         src/unix/getaddrinfo.c
+         src/unix/getnameinfo.c
+         src/unix/loop-watcher.c
+         src/unix/loop.c
+         src/unix/pipe.c
+         src/unix/poll.c
+         src/unix/process.c
+         src/unix/random-devurandom.c
+         src/unix/signal.c
+         src/unix/stream.c
+         src/unix/tcp.c
+         src/unix/thread.c
+         src/unix/tty.c
+         src/unix/udp.c)
+  endif()
   list(APPEND uv_test_sources test/runner-unix.c)
 endif()
 
@@ -430,6 +440,32 @@ if(CMAKE_SYSTEM_NAME STREQUAL "QNX")
     src/unix/no-proctitle.c
     src/unix/no-fsevents.c)
   list(APPEND uv_libraries socket)
+endif()
+
+# WASI / WASIX. See src/unix/wasi.c + src/unix/wasi-bootstrap.c and
+# .claude/plans/libuv-wasix-port.md in the consuming project for scope.
+# Drive CMake to this branch with `-DCMAKE_SYSTEM_NAME=WASI` in the
+# cross-compile toolchain file.
+if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
+  # Bootstrap-style subset: just enough for CMake's
+  # uv_spawn/uv_pipe/uv_read_start/uv_run/uv_timer path. No threads,
+  # no TCP, no UDP, no DNS in v1.
+  list(APPEND uv_sources
+    src/unix/core.c
+    src/unix/fs.c
+    src/unix/loop.c
+    src/unix/loop-watcher.c
+    src/unix/no-fsevents.c
+    src/unix/no-proctitle.c
+    src/unix/pipe.c
+    src/unix/posix-hrtime.c
+    src/unix/posix-poll.c
+    src/unix/process.c
+    src/unix/signal.c
+    src/unix/stream.c
+    src/unix/tty.c
+    src/unix/wasi.c
+    src/unix/wasi-bootstrap.c)
 endif()
 
 if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "DragonFly|FreeBSD|Linux|NetBSD|OpenBSD")
