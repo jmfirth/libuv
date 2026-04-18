@@ -60,6 +60,7 @@ struct uv__stream_select_s {
 };
 #endif /* defined(__APPLE__) */
 
+#if !defined(__wasi__)
 union uv__cmsg {
   struct cmsghdr hdr;
   /* This cannot be larger because of the IBMi PASE limitation that
@@ -69,6 +70,7 @@ union uv__cmsg {
 };
 
 STATIC_ASSERT(256 == sizeof(union uv__cmsg));
+#endif /* !__wasi__ */
 
 static void uv__stream_connect(uv_stream_t*);
 static void uv__write(uv_stream_t* stream);
@@ -777,6 +779,7 @@ static int uv__try_write(uv_stream_t* stream,
    * Now do the actual writev. Note that we've been updating the pointers
    * inside the iov each time we write. So there is no need to offset it.
    */
+#if !defined(__wasi__)
   if (send_handle != NULL) {
     int fd_to_send;
     struct msghdr msg;
@@ -808,7 +811,15 @@ static int uv__try_write(uv_stream_t* stream,
     do
       n = sendmsg(uv__stream_fd(stream), &msg, 0);
     while (n == -1 && errno == EINTR);
-  } else {
+  } else
+#else
+  /* WASI has no SCM_RIGHTS fd-passing. If a caller set send_handle, it
+   * will silently be ignored (the handle simply isn't transmitted).
+   * Bootstrap CMake never sets send_handle on its pipes, so this is a
+   * safe no-op for v1. */
+  (void) send_handle;
+#endif /* !__wasi__ */
+  {
     do
       n = uv__writev(uv__stream_fd(stream), iov, iovcnt);
     while (n == -1 && errno == EINTR);
@@ -978,6 +989,7 @@ static int uv__stream_queue_fd(uv_stream_t* stream, int fd) {
 }
 
 
+#if !defined(__wasi__)
 static int uv__stream_recv_cmsg(uv_stream_t* stream, struct msghdr* msg) {
   struct cmsghdr* cmsg;
   char* p;
@@ -1020,13 +1032,16 @@ static int uv__stream_recv_cmsg(uv_stream_t* stream, struct msghdr* msg) {
 
   return err;
 }
+#endif /* !__wasi__ */
 
 
 static void uv__read(uv_stream_t* stream) {
   uv_buf_t buf;
   ssize_t nread;
+#if !defined(__wasi__)
   struct msghdr msg;
   union uv__cmsg cmsg;
+#endif
   int count;
   int err;
   int is_ipc;
@@ -1038,7 +1053,14 @@ static void uv__read(uv_stream_t* stream) {
    */
   count = 32;
 
+#if defined(__wasi__)
+  /* WASI bootstrap has no IPC pipes (no SCM_RIGHTS). Treat all streams
+   * as non-ipc; avoids touching cmsg types that the patched wasix-libc
+   * sysroot doesn't provide. */
+  is_ipc = 0;
+#else
   is_ipc = stream->type == UV_NAMED_PIPE && ((uv_pipe_t*) stream)->ipc;
+#endif
 
   /* XXX: Maybe instead of having UV_HANDLE_READING we just test if
    * tcp->read_cb is NULL or not?
@@ -1059,6 +1081,13 @@ static void uv__read(uv_stream_t* stream) {
     assert(buf.base != NULL);
     assert(uv__stream_fd(stream) >= 0);
 
+#if defined(__wasi__)
+    /* is_ipc is always 0 on WASI; no recvmsg/cmsg path is reachable. */
+    do {
+      nread = read(uv__stream_fd(stream), buf.base, buf.len);
+    }
+    while (nread < 0 && errno == EINTR);
+#else
     if (!is_ipc) {
       do {
         nread = read(uv__stream_fd(stream), buf.base, buf.len);
@@ -1080,6 +1109,7 @@ static void uv__read(uv_stream_t* stream) {
       }
       while (nread < 0 && errno == EINTR);
     }
+#endif /* __wasi__ */
 
     if (nread < 0) {
       /* Error */
@@ -1114,6 +1144,7 @@ static void uv__read(uv_stream_t* stream) {
       /* Successful read */
       ssize_t buflen = buf.len;
 
+#if !defined(__wasi__)
       if (is_ipc) {
         err = uv__stream_recv_cmsg(stream, &msg);
         if (err != 0) {
@@ -1121,6 +1152,9 @@ static void uv__read(uv_stream_t* stream) {
           return;
         }
       }
+#else
+      (void) err;
+#endif
 
 #if defined(__MVS__)
       if (is_ipc && msg.msg_controllen > 0) {

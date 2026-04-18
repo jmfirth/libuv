@@ -717,7 +717,17 @@ int uv__cloexec(int fd, int set) {
 
 
 ssize_t uv__recvmsg(int fd, struct msghdr* msg, int flags) {
-#if defined(__ANDROID__)   || \
+#if defined(__wasi__)
+  /* WASI sockets have no SCM_RIGHTS / ancillary-data path. recvmsg is
+   * available but the cmsghdr-based fd-passing loop would reference
+   * incomplete type `struct cmsghdr`. The bootstrap port does not use
+   * fd passing (CMake's uv_pipe_open paths don't need it), so we just
+   * forward to recvmsg without the cloexec walk. */
+  ssize_t rc = recvmsg(fd, msg, flags);
+  if (rc == -1)
+    return UV__ERR(errno);
+  return rc;
+#elif defined(__ANDROID__)   || \
     defined(__DragonFly__) || \
     defined(__FreeBSD__)   || \
     defined(__NetBSD__)    || \
@@ -1586,6 +1596,15 @@ int uv_cpumask_size(void) {
 }
 
 int uv_os_getpriority(uv_pid_t pid, int* priority) {
+#if defined(__wasi__)
+  /* WASI has no getpriority / PRIO_PROCESS. Priority scheduling is not
+   * exposed. Return UV_ENOSYS so callers can degrade gracefully.
+   */
+  (void) pid;
+  if (priority == NULL)
+    return UV_EINVAL;
+  return UV_ENOSYS;
+#else
   int r;
 
   if (priority == NULL)
@@ -1599,10 +1618,18 @@ int uv_os_getpriority(uv_pid_t pid, int* priority) {
 
   *priority = r;
   return 0;
+#endif
 }
 
 
 int uv_os_setpriority(uv_pid_t pid, int priority) {
+#if defined(__wasi__)
+  /* WASI has no setpriority. See uv_os_getpriority above. */
+  (void) pid;
+  if (priority < UV_PRIORITY_HIGHEST || priority > UV_PRIORITY_LOW)
+    return UV_EINVAL;
+  return UV_ENOSYS;
+#else
   if (priority < UV_PRIORITY_HIGHEST || priority > UV_PRIORITY_LOW)
     return UV_EINVAL;
 
@@ -1610,6 +1637,7 @@ int uv_os_setpriority(uv_pid_t pid, int priority) {
     return UV__ERR(errno);
 
   return 0;
+#endif
 }
 
 /**
@@ -1619,6 +1647,15 @@ int uv_os_setpriority(uv_pid_t pid, int priority) {
  * So the output parameter priority is actually the nice value.
 */
 int uv_thread_getpriority(uv_thread_t tid, int* priority) {
+#if defined(__wasi__)
+  /* WASI does not expose pthread scheduling parameters. Return
+   * UV_ENOSYS so callers degrade gracefully instead of seeing a
+   * bogus value. */
+  (void) tid;
+  if (priority == NULL)
+    return UV_EINVAL;
+  return UV_ENOSYS;
+#else
   int r;
   int policy;
   struct sched_param param;
@@ -1646,6 +1683,7 @@ int uv_thread_getpriority(uv_thread_t tid, int* priority) {
 
   *priority = param.sched_priority;
   return 0;
+#endif /* !__wasi__ */
 }
 
 #ifdef __linux__
@@ -1670,7 +1708,15 @@ static int set_nice_for_calling_thread(int priority) {
  * If the function fails, the return value is non-zero.
 */
 int uv_thread_setpriority(uv_thread_t tid, int priority) {
-#if !defined(__GNU__)
+#if defined(__wasi__)
+  /* WASI does not expose pthread_setschedparam / sched_get_priority_*.
+   * Return UV_ENOSYS so CMake / other callers skip the priority tweak
+   * and fall back to default scheduling. */
+  (void) tid;
+  if (priority < UV_THREAD_PRIORITY_LOWEST || priority > UV_THREAD_PRIORITY_HIGHEST)
+    return UV_EINVAL;
+  return UV_ENOSYS;
+#elif !defined(__GNU__)
   int r;
   int min;
   int max;
