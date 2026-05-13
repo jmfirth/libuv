@@ -390,3 +390,380 @@ ssize_t uv__fs_copy_file_range(int fd_in, off_t* off_in,
   return -1;
 }
 #endif
+
+
+/* ========================================================================
+ * Public uv_tcp_/uv_udp_/uv_poll_ surface
+ *
+ * Edge.js (`wasmerio/edgejs`, firebox#366 Mechanism α) compiles a wider
+ * surface than our v1 CMake-bootstrap scope: edge_tcp_wrap.cc / node's
+ * tcp_wrap.cc reference the FULL public `uv_tcp_*` API; Node's
+ * dns_wrap.cc references `uv_getaddrinfo` / `uv_getnameinfo`; the
+ * UDP wrap references `uv_udp_*` set-methods; threadpool worker code
+ * references `uv_sem_*`; the dynamic-loader binding references
+ * `uv_dl*`. Our CMake source list deliberately omits tcp.c / udp.c /
+ * poll.c / dl.c / getaddrinfo.c — all of which expand to dead paths
+ * since wasm32-wasi has no real socket-handle/posix-poll/dlopen
+ * primitives behind them. But the symbol references in Edge.js's
+ * static-link still need resolution.
+ *
+ * All stubs return UV_ENOSYS and set errno. JS callers see the
+ * standard "ENOSYS"/"not implemented" error path Node already has for
+ * other unsupported platforms. uv_get_*_memory and uv_loadavg/uv_uptime
+ * are in src/unix/wasi.c (real per-platform-utility location); these
+ * are the cross-link stubs only.
+ * ======================================================================== */
+
+/* -- uv_tcp_* (public) -- */
+
+int uv_tcp_init(uv_loop_t* loop, uv_tcp_t* handle) {
+  (void) loop; (void) handle;
+  return UV_ENOSYS;
+}
+
+
+int uv_tcp_open(uv_tcp_t* handle, uv_os_sock_t sock) {
+  (void) handle; (void) sock;
+  return UV_ENOSYS;
+}
+
+
+int uv_tcp_getsockname(const uv_tcp_t* handle,
+                       struct sockaddr* name,
+                       int* namelen) {
+  (void) handle; (void) name; (void) namelen;
+  return UV_ENOSYS;
+}
+
+
+int uv_tcp_getpeername(const uv_tcp_t* handle,
+                       struct sockaddr* name,
+                       int* namelen) {
+  (void) handle; (void) name; (void) namelen;
+  return UV_ENOSYS;
+}
+
+
+int uv_tcp_close_reset(uv_tcp_t* handle, uv_close_cb close_cb) {
+  (void) handle; (void) close_cb;
+  return UV_ENOSYS;
+}
+
+
+/* uv__tcp_bind / uv__tcp_connect — internal helpers, referenced by
+ * uv_tcp_bind / uv_tcp_connect wrappers. Match upstream signatures.
+ */
+int uv__tcp_bind(uv_tcp_t* tcp,
+                 const struct sockaddr* addr,
+                 unsigned int addrlen,
+                 unsigned int flags) {
+  (void) tcp; (void) addr; (void) addrlen; (void) flags;
+  return UV_ENOSYS;
+}
+
+
+int uv__tcp_connect(uv_connect_t* req,
+                    uv_tcp_t* handle,
+                    const struct sockaddr* addr,
+                    unsigned int addrlen,
+                    uv_connect_cb cb) {
+  (void) req; (void) handle; (void) addr; (void) addrlen; (void) cb;
+  return UV_ENOSYS;
+}
+
+
+int uv__tcp_listen(uv_tcp_t* tcp, int backlog, uv_connection_cb cb) {
+  (void) tcp; (void) backlog; (void) cb;
+  return UV_ENOSYS;
+}
+
+
+/* PUBLIC uv_tcp_nodelay / uv_tcp_keepalive variants (take uv_tcp_t*,
+ * not fd). The earlier uv__tcp_nodelay / uv__tcp_keepalive are the
+ * fd-taking internal variants. Both are referenced by tcp_wrap.cc.
+ */
+int uv_tcp_nodelay(uv_tcp_t* handle, int enable) {
+  (void) handle; (void) enable;
+  return UV_ENOSYS;
+}
+
+
+int uv_tcp_keepalive(uv_tcp_t* handle, int enable, unsigned int delay) {
+  (void) handle; (void) enable; (void) delay;
+  return UV_ENOSYS;
+}
+
+
+/* -- uv_udp_* (public + a few internal helpers) -- */
+
+int uv_udp_getsockname(const uv_udp_t* handle,
+                       struct sockaddr* name,
+                       int* namelen) {
+  (void) handle; (void) name; (void) namelen;
+  return UV_ENOSYS;
+}
+
+
+int uv_udp_getpeername(const uv_udp_t* handle,
+                       struct sockaddr* name,
+                       int* namelen) {
+  (void) handle; (void) name; (void) namelen;
+  return UV_ENOSYS;
+}
+
+
+int uv_udp_set_membership(uv_udp_t* handle,
+                          const char* multicast_addr,
+                          const char* interface_addr,
+                          uv_membership membership) {
+  (void) handle; (void) multicast_addr;
+  (void) interface_addr; (void) membership;
+  return UV_ENOSYS;
+}
+
+
+int uv_udp_set_source_membership(uv_udp_t* handle,
+                                 const char* multicast_addr,
+                                 const char* interface_addr,
+                                 const char* source_addr,
+                                 uv_membership membership) {
+  (void) handle; (void) multicast_addr; (void) interface_addr;
+  (void) source_addr; (void) membership;
+  return UV_ENOSYS;
+}
+
+
+int uv_udp_set_multicast_loop(uv_udp_t* handle, int on) {
+  (void) handle; (void) on;
+  return UV_ENOSYS;
+}
+
+
+int uv_udp_set_multicast_ttl(uv_udp_t* handle, int ttl) {
+  (void) handle; (void) ttl;
+  return UV_ENOSYS;
+}
+
+
+int uv_udp_set_multicast_interface(uv_udp_t* handle,
+                                   const char* interface_addr) {
+  (void) handle; (void) interface_addr;
+  return UV_ENOSYS;
+}
+
+
+int uv_udp_set_broadcast(uv_udp_t* handle, int on) {
+  (void) handle; (void) on;
+  return UV_ENOSYS;
+}
+
+
+int uv_udp_set_ttl(uv_udp_t* handle, int ttl) {
+  (void) handle; (void) ttl;
+  return UV_ENOSYS;
+}
+
+
+int uv__udp_init_ex(uv_loop_t* loop,
+                    uv_udp_t* handle,
+                    unsigned int flags,
+                    int domain) {
+  (void) loop; (void) handle; (void) flags; (void) domain;
+  return UV_ENOSYS;
+}
+
+
+int uv__udp_bind(uv_udp_t* handle,
+                 const struct sockaddr* addr,
+                 unsigned int addrlen,
+                 unsigned int flags) {
+  (void) handle; (void) addr; (void) addrlen; (void) flags;
+  return UV_ENOSYS;
+}
+
+
+int uv__udp_connect(uv_udp_t* handle,
+                    const struct sockaddr* addr,
+                    unsigned int addrlen) {
+  (void) handle; (void) addr; (void) addrlen;
+  return UV_ENOSYS;
+}
+
+
+int uv__udp_disconnect(uv_udp_t* handle) {
+  (void) handle;
+  return UV_ENOSYS;
+}
+
+
+int uv__udp_send(uv_udp_send_t* req,
+                 uv_udp_t* handle,
+                 const uv_buf_t bufs[],
+                 unsigned int nbufs,
+                 const struct sockaddr* addr,
+                 unsigned int addrlen,
+                 uv_udp_send_cb send_cb) {
+  (void) req; (void) handle; (void) bufs; (void) nbufs;
+  (void) addr; (void) addrlen; (void) send_cb;
+  return UV_ENOSYS;
+}
+
+
+int uv__udp_try_send(uv_udp_t* handle,
+                     const uv_buf_t bufs[],
+                     unsigned int nbufs,
+                     const struct sockaddr* addr,
+                     unsigned int addrlen) {
+  (void) handle; (void) bufs; (void) nbufs; (void) addr; (void) addrlen;
+  return UV_ENOSYS;
+}
+
+
+int uv__udp_try_send2(uv_udp_t* handle,
+                      unsigned int count,
+                      uv_buf_t* bufs[/*count*/],
+                      unsigned int nbufs[/*count*/],
+                      struct sockaddr* addrs[/*count*/]) {
+  (void) handle; (void) count; (void) bufs; (void) nbufs; (void) addrs;
+  return UV_ENOSYS;
+}
+
+
+int uv__udp_recv_start(uv_udp_t* handle,
+                       uv_alloc_cb alloc_cb,
+                       uv_udp_recv_cb recv_cb) {
+  (void) handle; (void) alloc_cb; (void) recv_cb;
+  return UV_ENOSYS;
+}
+
+
+int uv__udp_recv_stop(uv_udp_t* handle) {
+  (void) handle;
+  return 0;
+}
+
+
+/* -- uv_poll_* (public) -- */
+
+int uv_poll_init_socket(uv_loop_t* loop,
+                        uv_poll_t* handle,
+                        uv_os_sock_t socket) {
+  (void) loop; (void) handle; (void) socket;
+  return UV_ENOSYS;
+}
+
+
+int uv_poll_start(uv_poll_t* handle, int events, uv_poll_cb cb) {
+  (void) handle; (void) events; (void) cb;
+  return UV_ENOSYS;
+}
+
+
+int uv_poll_stop(uv_poll_t* handle) {
+  (void) handle;
+  return UV_ENOSYS;
+}
+
+
+/* -- uv_sem_* (referenced by threadpool / async worker code) -- */
+
+int uv_sem_init(uv_sem_t* sem, unsigned int value) {
+  (void) sem; (void) value;
+  return 0;
+}
+
+
+void uv_sem_destroy(uv_sem_t* sem) {
+  (void) sem;
+}
+
+
+void uv_sem_post(uv_sem_t* sem) {
+  (void) sem;
+}
+
+
+void uv_sem_wait(uv_sem_t* sem) {
+  (void) sem;
+}
+
+
+/* -- uv_dl* (dynamic loader; static-linked WASM has no dlopen) -- */
+
+int uv_dlopen(const char* filename, uv_lib_t* lib) {
+  (void) filename;
+  if (lib != NULL) {
+    /* Match upstream pattern: zero out the handle. uv_lib_t has
+     * `handle` (void*) and `errmsg` (char*); both POD. */
+    memset(lib, 0, sizeof(*lib));
+  }
+  return UV_ENOSYS;
+}
+
+
+void uv_dlclose(uv_lib_t* lib) {
+  (void) lib;
+}
+
+
+int uv_dlsym(uv_lib_t* lib, const char* name, void** ptr) {
+  (void) lib; (void) name;
+  if (ptr != NULL) *ptr = NULL;
+  return UV_ENOSYS;
+}
+
+
+const char* uv_dlerror(const uv_lib_t* lib) {
+  (void) lib;
+  return "uv_dlopen not supported on WASI";
+}
+
+
+/* -- uv_thread_setname / DNS surface / interface_addresses --
+ * referenced by Node's worker / net / dns wrappers.
+ */
+
+int uv_thread_setname(const char* name) {
+  (void) name;
+  return UV_ENOSYS;
+}
+
+
+int uv_getaddrinfo(uv_loop_t* loop,
+                   uv_getaddrinfo_t* req,
+                   uv_getaddrinfo_cb getaddrinfo_cb,
+                   const char* node,
+                   const char* service,
+                   const struct addrinfo* hints) {
+  (void) loop; (void) req; (void) getaddrinfo_cb;
+  (void) node; (void) service; (void) hints;
+  return UV_ENOSYS;
+}
+
+
+void uv_freeaddrinfo(struct addrinfo* ai) {
+  (void) ai;
+}
+
+
+int uv_getnameinfo(uv_loop_t* loop,
+                   uv_getnameinfo_t* req,
+                   uv_getnameinfo_cb getnameinfo_cb,
+                   const struct sockaddr* addr,
+                   int flags) {
+  (void) loop; (void) req; (void) getnameinfo_cb;
+  (void) addr; (void) flags;
+  return UV_ENOSYS;
+}
+
+
+int uv_interface_addresses(uv_interface_address_t** addresses, int* count) {
+  if (addresses != NULL) *addresses = NULL;
+  if (count != NULL) *count = 0;
+  return UV_ENOSYS;
+}
+
+
+void uv_free_interface_addresses(uv_interface_address_t* addresses, int count) {
+  (void) addresses; (void) count;
+}
