@@ -157,6 +157,38 @@ uint64_t uv_hrtime(void) {
 
 
 void uv_close(uv_handle_t* handle, uv_close_cb close_cb) {
+  /* firebox#366 cascade-4 PROPER fix: tolerate UV_UNKNOWN_HANDLE.
+   *
+   * On WASI, several handle types (TCP, UDP, POLL) are stubbed out
+   * via wasi-bootstrap.c — their `uv_*_init` returns UV_ENOSYS
+   * without ever touching the `type` field, so the handle's
+   * `type` remains zero (UV_UNKNOWN_HANDLE) from the caller's
+   * value-initialization. Node's defensive cleanup paths
+   * (especially RAII destructors and atexit teardown) still
+   * call `uv_close` on those zero-typed handles. Upstream's
+   * `default: assert(0)` then trips SIGABRT, which propagates
+   * up as a fatal trap through the wasm runtime and breaks
+   * `child_process.spawn` event delivery for completely
+   * unrelated reasons (the JS layer sees no `error`/`close`
+   * events because the host process aborted before the libuv
+   * watcher could fire).
+   *
+   * Defensively short-circuit when the handle was never inited:
+   * mark it closing, run the close_cb if any, and return. The
+   * net effect matches what upstream does for a real handle
+   * type — the user-supplied close_cb is invoked, the handle
+   * is no longer "active", and resources tied to the
+   * uninitialized handle are still untouched (because nothing
+   * was ever allocated on it). */
+  if (handle->type == UV_UNKNOWN_HANDLE) {
+    handle->flags |= UV_HANDLE_CLOSING | UV_HANDLE_CLOSED;
+    handle->close_cb = close_cb;
+    if (close_cb != NULL) {
+      close_cb(handle);
+    }
+    return;
+  }
+
   assert(!uv__is_closing(handle));
 
   handle->flags |= UV_HANDLE_CLOSING;
