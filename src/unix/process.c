@@ -825,7 +825,48 @@ static int uv__spawn_and_init_child_fork(const uv_process_options_t* options,
   if (pthread_sigmask(SIG_BLOCK, &signewset, &sigoldset) != 0)
     abort();
 
+  /* firebox#366 cascade-6: under WASIX EH mode (`-fwasm-exceptions`),
+   * wasix-libc deliberately hides `fork()` and provides `vfork()`
+   * implemented as a setjmp/longjmp + `__wasi_proc_fork_env` +
+   * `__wasi_proc_exec3` macro instead. Reason: real `fork()` requires
+   * the runtime to capture/restore the wasm stack via asyncify, but
+   * asyncify is incompatible with the new exnref-based exception
+   * handling that V8/Edge.js requires. The vfork macro must be called
+   * IN THE SAME FUNCTION as the longjmp target (i.e., here), so the
+   * call to vfork() must be inline in this function — no further
+   * factoring.
+   *
+   * vfork()'s semantics in EH mode:
+   *   - First call returns 0; WasiEnv has swapped to a "child" env.
+   *     All subsequent libc calls operate on the child's FD table
+   *     until proc_exec3 or proc_exit2 is invoked. dup2/close in
+   *     uv__process_child_init affect the child env, not the parent.
+   *   - When execvp() succeeds (or fails-and-_exit), the parent's
+   *     setjmp longjmps back; vfork() returns the child's PID.
+   *
+   * On non-WASIX targets this is exactly POSIX vfork. The "parent
+   * suspended" semantics of vfork are stricter than fork — but since
+   * uv__process_child_init only calls async-signal-safe operations
+   * (dup2, close, sigaction, execvp), it's vfork-safe.
+   *
+   * Why not just fork()? See packages/edgejs/build.sh Step 4 and
+   * wasix-libc's musl/src/process/fork.c: in EH mode the fork()
+   * symbol is gated out at the libc level, and our `wasix_compat.cc`
+   * shim that called `__wasi_proc_fork` directly trips the wasmer-
+   * wasix runtime's "failed to unwind the stack because the
+   * asyncify_start_unwind export is missing" path — `proc_fork`
+   * returns Errno::Noexec to the guest, the libuv path proceeds as
+   * if fork succeeded with no real child, pipe handles never get
+   * UV_HANDLE_READABLE set, and downstream `uv_read_start` returns
+   * UV_ENOTCONN. The cascade-6 trace at
+   * work/tracks/edgejs/reports/cascade6-spawn-path-fix.md captures
+   * the full chain.
+   */
+#if defined(__wasi__) && defined(__wasm_exception_handling__)
+  *pid = vfork();
+#else
   *pid = fork();
+#endif
 
   if (*pid == 0) {
     /* Fork succeeded, in the child process */
