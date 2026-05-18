@@ -51,6 +51,23 @@
 #  define POSIX_SPAWN_SETSID 1024
 # endif
 
+#elif defined(__wasi__)
+/* firebox#427 cascade-5: under WASIX EH mode, the vfork() path in
+ * uv__spawn_and_init_child_fork eventually triggers an exnref-based
+ * longjmp that libunwind cannot dispatch across the JIT-to-native
+ * boundary, surfacing as Error: read ENOTCONN at the libuv pipe
+ * layer. WASIX exposes a host posix_spawn equivalent
+ * (`__wasi_proc_spawn2`) that performs the entire fork/exec sequence
+ * in a single host syscall — no setjmp, no longjmp, no wasm-EH
+ * throw — wired through wasix-libc's posix_spawn(3). Prefer that
+ * path on __wasi__ before falling through to the vfork-EH path.
+ *
+ * See work/tasks/427-edgejs-cascade-5-e2-libuv-posix-spawn-wasi-gate/
+ * and work/tracks/edgejs/reports/2026-05-17-cascade5-e1-feasibility-probe.md
+ * for the full mechanism. */
+# include <spawn.h>
+extern char **environ;
+
 #else
 extern char **environ;
 #endif
@@ -803,6 +820,269 @@ error:
 }
 #endif
 
+#if defined(__wasi__)
+/* firebox#427 cascade-5: WASIX posix_spawn helper functions.
+ *
+ * These mirror the macOS posix_spawn block above but use only the
+ * portable POSIX subset that wasix-libc exports. Notably absent
+ * (versus the Apple path):
+ *   - POSIX_SPAWN_CLOEXEC_DEFAULT (Apple extension; wasix children
+ *     do not inherit the parent's open fds by default — the fd
+ *     hand-off goes through bin_factory.spawn's env-fork in the host).
+ *   - posix_spawn_file_actions_addinherit_np (Apple extension).
+ *   - dlsym/once-init dance for posix_spawn_file_actions_addchdir_np:
+ *     wasix-libc exports it as a direct symbol so we can call it
+ *     unconditionally (no runtime feature detection needed).
+ *   - sysctl/sscanf_l-based POSIX_SPAWN_SETSID feature detect:
+ *     wasix-libc defines POSIX_SPAWN_SETSID in <spawn.h>; the host
+ *     either supports it or returns ENOSYS at posix_spawn time.
+ *
+ * All file actions execute on the child's WasiEnv inside the host's
+ * `__wasi_proc_spawn2` syscall — no setjmp, no longjmp, no wasm-EH
+ * dispatch. This avoids the cascade-5 ENOTCONN failure mode entirely.
+ */
+
+static int uv__spawn_set_posix_spawn_attrs_wasi(
+    posix_spawnattr_t* attrs,
+    const uv_process_options_t* options) {
+  int err;
+  short flags;
+  sigset_t signal_set;
+
+  err = posix_spawnattr_init(attrs);
+  if (err != 0)
+    return err;
+
+  if (options->flags & (UV_PROCESS_SETUID | UV_PROCESS_SETGID)) {
+    /* WASIX does not implement setuid/setgid in posix_spawnattr. Fall
+     * through to the fork path so callers can see the standard libuv
+     * error semantics. */
+    err = ENOSYS;
+    goto error;
+  }
+
+  flags = POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
+  if (options->flags & UV_PROCESS_DETACHED)
+    flags |= POSIX_SPAWN_SETSID;
+
+  err = posix_spawnattr_setflags(attrs, flags);
+  if (err != 0)
+    goto error;
+
+  /* Reset all signals in the child to their default behavior */
+  sigfillset(&signal_set);
+  err = posix_spawnattr_setsigdefault(attrs, &signal_set);
+  if (err != 0)
+    goto error;
+
+  /* Reset the signal mask for all signals */
+  sigemptyset(&signal_set);
+  err = posix_spawnattr_setsigmask(attrs, &signal_set);
+  if (err != 0)
+    goto error;
+
+  return 0;
+
+error:
+  (void) posix_spawnattr_destroy(attrs);
+  return err;
+}
+
+
+static int uv__spawn_set_posix_spawn_file_actions_wasi(
+    posix_spawn_file_actions_t* actions,
+    const uv_process_options_t* options,
+    int stdio_count,
+    int (*pipes)[2]) {
+  int fd;
+  int fd2;
+  int use_fd;
+  int err;
+
+  err = posix_spawn_file_actions_init(actions);
+  if (err != 0)
+    return err;
+
+  /* Set the current working directory if requested. wasix-libc exports
+   * posix_spawn_file_actions_addchdir_np directly; no dlsym dance. */
+  if (options->cwd != NULL) {
+    err = posix_spawn_file_actions_addchdir_np(actions, options->cwd);
+    if (err != 0)
+      goto error;
+  }
+
+  /* Do not return ENOSYS after this point, as we may mutate pipes. */
+
+  /* First duplicate low numbered fds, since it's not safe to duplicate them,
+   * they could get replaced. Example: swapping stdout and stderr; without
+   * this fd 2 (stderr) would be duplicated into fd 1, thus making both
+   * stdout and stderr go to the same fd, which was not the intention. */
+  for (fd = 0; fd < stdio_count; fd++) {
+    use_fd = pipes[fd][1];
+    if (use_fd < 0 || use_fd >= fd)
+      continue;
+    use_fd = stdio_count;
+    for (fd2 = 0; fd2 < stdio_count; fd2++) {
+      if (pipes[fd2][1] == use_fd) {
+        use_fd++;
+        fd2 = 0;
+      }
+    }
+    err = posix_spawn_file_actions_adddup2(actions, pipes[fd][1], use_fd);
+    assert(err != ENOSYS);
+    if (err != 0)
+      goto error;
+    pipes[fd][1] = use_fd;
+  }
+
+  /* Second, move the descriptors into their respective places.
+   *
+   * Unlike the Apple path, we do NOT have POSIX_SPAWN_CLOEXEC_DEFAULT,
+   * so any fd already at its target slot can be left alone (it's
+   * implicitly inherited). When the source fd and destination fd
+   * differ, dup2 it. */
+  for (fd = 0; fd < stdio_count; fd++) {
+    use_fd = pipes[fd][1];
+    if (use_fd < 0) {
+      if (fd >= 3)
+        continue;
+      else {
+        /* If ignored, redirect to (or from) /dev/null. */
+        err = posix_spawn_file_actions_addopen(
+          actions,
+          fd,
+          "/dev/null",
+          fd == 0 ? O_RDONLY : O_RDWR,
+          0);
+        assert(err != ENOSYS);
+        if (err != 0)
+          goto error;
+        continue;
+      }
+    }
+
+    if (fd == use_fd) {
+      /* fd already in the right slot; no Apple-style addinherit_np
+       * needed since the wasix child env inherits the unmanipulated
+       * fds by default. */
+      continue;
+    } else {
+      err = posix_spawn_file_actions_adddup2(actions, use_fd, fd);
+      assert(err != ENOSYS);
+      if (err != 0)
+        goto error;
+    }
+
+    /* Make sure the fd is marked as non-blocking (state shared between
+     * child and parent via the wasix env-fork's fd-table inheritance). */
+    uv__nonblock_fcntl(use_fd, 0);
+  }
+
+  /* Finally, close all the superfluous descriptors. Without
+   * POSIX_SPAWN_CLOEXEC_DEFAULT, any parent fd not explicitly closed
+   * here would be visible to the child; close those that aren't being
+   * mapped into a stdio slot. */
+  for (fd = 0; fd < stdio_count; fd++) {
+    use_fd = pipes[fd][1];
+    if (use_fd < stdio_count)
+      continue;
+
+    /* Check if we already closed this. */
+    for (fd2 = 0; fd2 < fd; fd2++) {
+      if (pipes[fd2][1] == use_fd)
+        break;
+    }
+    if (fd2 < fd)
+      continue;
+
+    err = posix_spawn_file_actions_addclose(actions, use_fd);
+    assert(err != ENOSYS);
+    if (err != 0)
+      goto error;
+  }
+
+  return 0;
+
+error:
+  (void) posix_spawn_file_actions_destroy(actions);
+  return err;
+}
+
+
+static int uv__spawn_resolve_and_spawn_wasi(
+    const uv_process_options_t* options,
+    posix_spawnattr_t* attrs,
+    posix_spawn_file_actions_t* actions,
+    pid_t* pid) {
+  int err;
+  char** env;
+
+  if (options->file == NULL)
+    return ENOENT;
+
+  /* The environment for the child process is that of the parent unless
+   * overridden by options->env. */
+  env = environ;
+  if (options->env != NULL)
+    env = options->env;
+
+  /* If options->file contains a slash, posix_spawn and posix_spawnp
+   * behave identically (no PATH resolution). Otherwise, use the
+   * libc-provided posix_spawnp which delegates path resolution to the
+   * host via the search_path flag of __wasi_proc_spawn2. */
+  if (strchr(options->file, '/') != NULL) {
+    do
+      err = posix_spawn(pid, options->file, actions, attrs,
+                        options->args, env);
+    while (err == EINTR);
+  } else {
+    do
+      err = posix_spawnp(pid, options->file, actions, attrs,
+                         options->args, env);
+    while (err == EINTR);
+  }
+
+  return err;
+}
+
+
+static int uv__spawn_and_init_child_posix_spawn_wasi(
+    const uv_process_options_t* options,
+    int stdio_count,
+    int (*pipes)[2],
+    pid_t* pid) {
+  int err;
+  posix_spawnattr_t attrs;
+  posix_spawn_file_actions_t actions;
+
+  err = uv__spawn_set_posix_spawn_attrs_wasi(&attrs, options);
+  if (err != 0)
+    goto error;
+
+  /* This may mutate pipes. */
+  err = uv__spawn_set_posix_spawn_file_actions_wasi(&actions,
+                                                    options,
+                                                    stdio_count,
+                                                    pipes);
+  if (err != 0) {
+    (void) posix_spawnattr_destroy(&attrs);
+    goto error;
+  }
+
+  err = uv__spawn_resolve_and_spawn_wasi(options, &attrs, &actions, pid);
+  assert(err != ENOSYS);
+
+  /* Destroy the actions/attributes */
+  (void) posix_spawn_file_actions_destroy(&actions);
+  (void) posix_spawnattr_destroy(&attrs);
+
+error:
+  /* In an error situation, the attributes and file actions are
+   * already destroyed, only the happy path requires cleanup. */
+  return UV__ERR(err);
+}
+#endif  /* defined(__wasi__) */
+
 static int uv__spawn_and_init_child_fork(const uv_process_options_t* options,
                                          int stdio_count,
                                          int (*pipes)[2],
@@ -922,6 +1202,22 @@ static int uv__spawn_and_init_child(
   /* The posix_spawn flow will return UV_ENOSYS if any of the posix_spawn_x_np
    * non-standard functions is both _needed_ and _undefined_. In those cases,
    * default back to the fork/execve strategy. For all other errors, just fail. */
+  if (err != UV_ENOSYS)
+    return err;
+
+#elif defined(__wasi__)
+  /* firebox#427 cascade-5: prefer posix_spawn over the vfork-EH path
+   * to avoid the libunwind / wasm-EH dispatch failure that surfaces as
+   * Error: read ENOTCONN at the libuv pipe layer. The WASIX
+   * __wasi_proc_spawn2 host syscall does the full fork+exec in one
+   * non-trapping host call — no setjmp/longjmp, no exnref throw.
+   *
+   * If WASIX's posix_spawn returns ENOSYS (e.g., older runtime), fall
+   * through to the existing vfork-EH path. */
+  err = uv__spawn_and_init_child_posix_spawn_wasi(options,
+                                                  stdio_count,
+                                                  pipes,
+                                                  pid);
   if (err != UV_ENOSYS)
     return err;
 
