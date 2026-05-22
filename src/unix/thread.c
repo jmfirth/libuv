@@ -135,6 +135,41 @@ int uv_thread_detach(uv_thread_t *tid) {
 }
 
 
+#ifdef __wasi__
+/* firebox#438: on wasm, indirect calls (`call_indirect`) are type-checked
+ * against the wasm function signature recorded in the table. libuv's
+ * worker entry point is `void (*)(void*)` but `pthread_create`'s thread
+ * routine is `void* (*)(void*)` — two DISTINCT wasm types. The native
+ * code below squelches the difference with a function-pointer union
+ * (`f.in`/`f.out`); on native that is benign because both pointer types
+ * share an identical calling convention, but on wasm it makes the
+ * thread trampoline `call_indirect` the entry with the wrong signature
+ * → `RuntimeError: indirect call type mismatch` and the worker thread
+ * dies before running any libuv work. (That is exactly what surfaced
+ * once the threadpool stopped abort()-ing — the worker threads spawned
+ * but immediately faulted.)
+ *
+ * The wasm-correct fix is a REAL trampoline — an actual
+ * `void* (*)(void*)` function — instead of a type pun. It carries the
+ * original `void (*)(void*)` entry + its arg through a small
+ * heap-allocated context, calls `entry(arg)` with the correct
+ * signature, and returns NULL. */
+struct uv__wasi_thread_ctx {
+  void (*entry)(void* arg);
+  void* arg;
+};
+
+static void* uv__wasi_thread_trampoline(void* p) {
+  struct uv__wasi_thread_ctx* ctx = p;
+  void (*entry)(void* arg) = ctx->entry;
+  void* arg = ctx->arg;
+  uv__free(ctx);
+  entry(arg);
+  return NULL;
+}
+#endif  /* __wasi__ */
+
+
 int uv_thread_create_ex(uv_thread_t* tid,
                         const uv_thread_options_t* params,
                         void (*entry)(void *arg),
@@ -145,12 +180,6 @@ int uv_thread_create_ex(uv_thread_t* tid,
   size_t pagesize;
   size_t stack_size;
   size_t min_stack_size;
-
-  /* Used to squelch a -Wcast-function-type warning. */
-  union {
-    void (*in)(void*);
-    void* (*out)(void*);
-  } f;
 
   stack_size =
       params->flags & UV_THREAD_HAS_STACK_SIZE ? params->stack_size : 0;
@@ -177,8 +206,35 @@ int uv_thread_create_ex(uv_thread_t* tid,
       abort();
   }
 
-  f.in = entry;
-  err = pthread_create(tid, attr, f.out, arg);
+#ifdef __wasi__
+  {
+    /* wasm: route through a real void*(void*) trampoline (see the
+     * uv__wasi_thread_trampoline comment above). The context is freed
+     * by the trampoline on the worker thread; if pthread_create fails
+     * we free it here instead. */
+    struct uv__wasi_thread_ctx* ctx = uv__malloc(sizeof(*ctx));
+    if (ctx == NULL) {
+      if (attr != NULL)
+        pthread_attr_destroy(attr);
+      return UV_ENOMEM;
+    }
+    ctx->entry = entry;
+    ctx->arg = arg;
+    err = pthread_create(tid, attr, uv__wasi_thread_trampoline, ctx);
+    if (err != 0)
+      uv__free(ctx);
+  }
+#else
+  {
+    /* Used to squelch a -Wcast-function-type warning. */
+    union {
+      void (*in)(void*);
+      void* (*out)(void*);
+    } f;
+    f.in = entry;
+    err = pthread_create(tid, attr, f.out, arg);
+  }
+#endif
 
   if (attr != NULL)
     pthread_attr_destroy(attr);
