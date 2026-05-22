@@ -28,10 +28,6 @@
  *
  * What we stub in this file:
  *
- *   - Threadpool (uv__work_submit / uv__work_done / uv__threadpool_cleanup).
- *     Our v1 port is single-threaded; libuv's async DNS and async fs
- *     paths are off.
- *
  *   - Async handles (uv_async_init / send / close / fork / stop). Used
  *     for cross-thread wakeup, which the bootstrap path does not need.
  *
@@ -40,12 +36,22 @@
  *   - Dynamic linking (uv_dlopen / dlerror / dlsym / dlclose). Out-of-
  *     scope for v1; our WASM binaries are statically linked.
  *
- *   - Mutex / rwlock / once / pthread_atfork / pthread_sigmask. These
- *     are supplied as trivial single-threaded no-ops. wasix-libc does
- *     provide real pthread primitives; we could wire them up in a
- *     later revision. For v1 the stubs suffice.
+ *   - pthread_atfork / pthread_sigmask. Firebox-specific helper symbols
+ *     supplied as trivial no-ops (no fork-time pthread re-init hook;
+ *     signal masks handled at the WASIX layer).
  *
  *   - uv__fs_poll_close (so stat-polling fs watchers don't undef).
+ *
+ * What this file NO LONGER stubs (firebox#438):
+ *
+ *   - Threads / mutex / rwlock / cond / once / sem. src/unix/thread.c
+ *     (libuv's portable pthread backend) is now in the WASI CMake
+ *     source list — the Firebox sysroot exports the full pthread
+ *     surface over shared linear memory, so libuv gets real worker
+ *     threads. This is what lets libuv's threadpool.c init_threads()
+ *     succeed instead of abort()-ing on a uv_thread_create_ex ENOSYS
+ *     stub (the cascade-7 npm-install SIGABRT). Re-stubbing those
+ *     symbols here would clash with thread.c at link time.
  *
  *   - Process title. WASI has no argv modification ABI; title ops
  *     are tracked in the common uv-common.c layer but need the
@@ -65,7 +71,7 @@
 
 #include <errno.h>
 #include <stdlib.h> /* abort */
-#include <string.h> /* memcmp, memset */
+#include <string.h> /* memset */
 #include <signal.h>
 #include <sys/socket.h> /* socketpair */
 
@@ -140,14 +146,24 @@ void uv__async_stop(uv_loop_t* loop) {
  *
  * Provided by src/threadpool.c (portable, already in the source list).
  * We don't re-stub uv__work_submit / uv__work_done here — doing so
- * would produce duplicate-symbol link errors. If the threadpool code
- * path is exercised at runtime it'll try to spawn worker threads; our
- * v1 scope (CMake bootstrap subset) does not exercise this path.
+ * would produce duplicate-symbol link errors. firebox#438: the
+ * threadpool path IS now exercised at runtime — threadpool.c's
+ * init_threads() spawns real worker threads via thread.c's
+ * uv_thread_create_ex (backed by pthread_create on the Firebox
+ * sysroot). npm-cli.js startup triggers this the first time it issues
+ * an async libuv primitive (e.g. uv_fs_open).
  * ======================================================================== */
 
 
 /* ========================================================================
- * pthread trampolines (single-threaded bootstrap — no-ops)
+ * pthread trampolines
+ *
+ * uv__pthread_atfork / uv__pthread_sigmask are Firebox-specific helper
+ * symbols (referenced by the WASI-gated paths in core.c / process.c).
+ * They are NOT provided by src/unix/thread.c, so they stay here. The
+ * single-threaded no-op shape is still correct for the WASI port: there
+ * is no fork-time pthread re-init hook to run, and signal masks are
+ * handled at the WASIX layer.
  * ======================================================================== */
 
 int uv__pthread_atfork(void (*prepare)(void), void (*parent)(void),
@@ -162,165 +178,30 @@ int uv__pthread_sigmask(int how, const sigset_t* set, sigset_t* oset) {
 
 
 /* ========================================================================
- * Mutex / rwlock / once — trivial single-threaded implementations
- * ======================================================================== */
-
-int uv_mutex_init(uv_mutex_t* mutex) {
-  return 0;
-}
-
-
-int uv_mutex_init_recursive(uv_mutex_t* mutex) {
-  return 0;
-}
-
-
-void uv_mutex_destroy(uv_mutex_t* mutex) {
-}
-
-
-void uv_mutex_lock(uv_mutex_t* mutex) {
-}
-
-
-int uv_mutex_trylock(uv_mutex_t* mutex) {
-  return 0;
-}
-
-
-void uv_mutex_unlock(uv_mutex_t* mutex) {
-}
-
-
-int uv_rwlock_init(uv_rwlock_t* rwlock) {
-  return 0;
-}
-
-
-void uv_rwlock_destroy(uv_rwlock_t* rwlock) {
-}
-
-
-void uv_rwlock_wrlock(uv_rwlock_t* rwlock) {
-}
-
-
-int uv_rwlock_trywrlock(uv_rwlock_t* rwlock) {
-  return 0;
-}
-
-
-void uv_rwlock_wrunlock(uv_rwlock_t* rwlock) {
-}
-
-
-void uv_rwlock_rdlock(uv_rwlock_t* rwlock) {
-}
-
-
-int uv_rwlock_tryrdlock(uv_rwlock_t* rwlock) {
-  return 0;
-}
-
-
-void uv_rwlock_rdunlock(uv_rwlock_t* rwlock) {
-}
-
-
-void uv_once(uv_once_t* guard, void (*callback)(void)) {
-  if (*guard) {
-    return;
-  }
-  *guard = 1;
-  callback();
-}
-
-
-/* ========================================================================
- * Condvars / thread join — referenced by src/threadpool.c
+ * Threads / mutex / rwlock / cond / once / sem — REAL implementations
  *
- * The threadpool file is in libuv's portable source list, so it ends
- * up in our archive even though we don't exercise the threadpool in
- * bootstrap-scope consumers. Link-time references from dead paths have
- * to resolve; single-threaded no-ops are sufficient.
+ * firebox#438: these are NO LONGER stubbed here. src/unix/thread.c (the
+ * portable libuv pthread backend) is now in the WASI CMake source list
+ * (see the `CMAKE_SYSTEM_NAME STREQUAL "WASI"` block in CMakeLists.txt).
+ * The Firebox sysroot exports the full pthread surface — pthread_create,
+ * pthread_join, pthread_mutex_*, pthread_cond_*, pthread_once, sem_* —
+ * over shared linear memory, so libuv gets real worker threads,
+ * mutexes, condvars and semaphores.
+ *
+ * Why this matters: libuv's threadpool.c init_threads() calls
+ * uv_thread_create_ex once per worker and abort()s on any non-zero
+ * return. The old single-threaded uv_thread_create_ex ENOSYS stub here
+ * made that abort() fire the first time any async libuv primitive (e.g.
+ * uv_fs_open from an npm-cli.js NAPI binding) lazily initialized the
+ * threadpool via uv_once(init_threads). That was the cascade-7
+ * npm-install SIGABRT (exit 134). With thread.c's real
+ * uv_thread_create_ex the pool initializes and npm-install runs.
+ *
+ * Re-stubbing uv_mutex_* / uv_rwlock_* / uv_cond_* / uv_once /
+ * uv_sem_* / uv_thread_* here would now produce duplicate-symbol link
+ * errors against thread.c — that is intentional: thread.c is the one
+ * canonical home for those symbols.
  * ======================================================================== */
-
-int uv_cond_init(uv_cond_t* cond) {
-  return 0;
-}
-
-
-void uv_cond_destroy(uv_cond_t* cond) {
-}
-
-
-void uv_cond_signal(uv_cond_t* cond) {
-}
-
-
-void uv_cond_broadcast(uv_cond_t* cond) {
-}
-
-
-void uv_cond_wait(uv_cond_t* cond, uv_mutex_t* mutex) {
-}
-
-
-int uv_cond_timedwait(uv_cond_t* cond, uv_mutex_t* mutex, uint64_t timeout) {
-  return UV_ENOSYS;
-}
-
-
-int uv_thread_join(uv_thread_t* tid) {
-  return 0;
-}
-
-
-int uv_thread_create(uv_thread_t* tid, void (*entry)(void* arg), void* arg) {
-  (void) tid;
-  (void) entry;
-  (void) arg;
-  return UV_ENOSYS;
-}
-
-
-int uv_thread_create_ex(uv_thread_t* tid,
-                        const uv_thread_options_t* params,
-                        void (*entry)(void* arg),
-                        void* arg) {
-  (void) tid;
-  (void) params;
-  (void) entry;
-  (void) arg;
-  return UV_ENOSYS;
-}
-
-
-int uv_thread_detach(uv_thread_t* tid) {
-  (void) tid;
-  return 0;
-}
-
-
-uv_thread_t uv_thread_self(void) {
-  uv_thread_t t;
-  /* zero-initialize; comparison via uv_thread_equal returns true only
-   * against another zero value, which on WASI is fine because we never
-   * have more than one thread. */
-#ifdef __wasi__
-  /* uv_thread_t is pthread_t on Unix; wasix-libc uses a struct/pointer.
-   * Just return a zero-initialized value. */
-  memset(&t, 0, sizeof(t));
-#else
-  t = (uv_thread_t){0};
-#endif
-  return t;
-}
-
-
-int uv_thread_equal(const uv_thread_t* t1, const uv_thread_t* t2) {
-  return memcmp(t1, t2, sizeof(*t1)) == 0;
-}
 
 
 /* ========================================================================
@@ -665,27 +546,12 @@ int uv_poll_stop(uv_poll_t* handle) {
 }
 
 
-/* -- uv_sem_* (referenced by threadpool / async worker code) -- */
-
-int uv_sem_init(uv_sem_t* sem, unsigned int value) {
-  (void) sem; (void) value;
-  return 0;
-}
-
-
-void uv_sem_destroy(uv_sem_t* sem) {
-  (void) sem;
-}
-
-
-void uv_sem_post(uv_sem_t* sem) {
-  (void) sem;
-}
-
-
-void uv_sem_wait(uv_sem_t* sem) {
-  (void) sem;
-}
+/* -- uv_sem_* — REAL implementations live in src/unix/thread.c
+ * (firebox#438). On the WASI target uv_sem_t is the POSIX sem_t and the
+ * Firebox sysroot exports sem_init / sem_post / sem_wait / sem_destroy /
+ * sem_trywait, so libuv's threadpool worker handshake (uv_sem_post in
+ * worker(), uv_sem_wait in init_threads()) uses genuine semaphores. Not
+ * stubbed here — that would clash with thread.c. -- */
 
 
 /* -- uv_dl* (dynamic loader; static-linked WASM has no dlopen) -- */
@@ -719,15 +585,16 @@ const char* uv_dlerror(const uv_lib_t* lib) {
 }
 
 
-/* -- uv_thread_setname / DNS surface / interface_addresses --
- * referenced by Node's worker / net / dns wrappers.
+/* -- DNS surface / interface_addresses — referenced by Node's net / dns
+ * wrappers.
+ *
+ * uv_thread_setname is REAL now (firebox#438): src/unix/thread.c routes
+ * it through wasix-libc's pthread_setname_np, so libuv-worker and V8
+ * thread names are set correctly. It is not stubbed here — that would
+ * clash with thread.c. (uv__thread_getname returns UV_ENOSYS via a
+ * __wasi__ branch in thread.c since wasix-libc has no
+ * pthread_getname_np.)
  */
-
-int uv_thread_setname(const char* name) {
-  (void) name;
-  return UV_ENOSYS;
-}
-
 
 int uv_getaddrinfo(uv_loop_t* loop,
                    uv_getaddrinfo_t* req,

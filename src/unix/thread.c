@@ -938,7 +938,15 @@ int uv__thread_setname(const char* name) {
 #if (defined(__ANDROID_API__) && __ANDROID_API__ < 26) || \
     defined(_AIX) || \
     defined(__MVS__) || \
-    defined(__PASE__)
+    defined(__PASE__) || \
+    defined(__wasi__)
+/* wasix-libc exposes pthread_setname_np (used by uv__thread_setname's
+ * generic #else branch below) but NOT pthread_getname_np — thread-name
+ * introspection has no WASI/WASIX syscall surface. Report UV_ENOSYS,
+ * matching what libuv already does for AIX / z/OS where the getname
+ * primitive is likewise absent. uv__thread_setname stays on the real
+ * pthread_setname_np path so libuv-worker / V8 thread names are still
+ * set correctly. */
 int uv__thread_getname(uv_thread_t* tid, char* name, size_t size) {
   return UV_ENOSYS;
 }

@@ -448,8 +448,32 @@ endif()
 # cross-compile toolchain file.
 if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
   # Bootstrap-style subset: just enough for CMake's
-  # uv_spawn/uv_pipe/uv_read_start/uv_run/uv_timer path. No threads,
-  # no TCP, no UDP, no DNS in v1.
+  # uv_spawn/uv_pipe/uv_read_start/uv_run/uv_timer path. No TCP, no
+  # UDP, no DNS in v1.
+  #
+  # firebox#438: src/unix/thread.c IS in this list. The Firebox sysroot
+  # (wasm32-wasi target, wasixcc-bundled musl top-half) exports the
+  # full pthread surface — pthread_create / pthread_join /
+  # pthread_mutex_* / pthread_cond_* / pthread_once / sem_* / getrlimit
+  # / getpagesize — over shared linear memory (see
+  # docs/architecture/runtime.md "What works today"). thread.c calls
+  # pthread_setname_np, which wasix-libc's musl headers gate behind
+  # _GNU_SOURCE — already defined globally by the Edge.js WASIX
+  # toolchain (wasix-toolchain.cmake: `CMAKE_C_FLAGS_INIT ...
+  # -D_GNU_SOURCE`). thread.c's only WASI gap, pthread_getname_np, is
+  # covered by a __wasi__ branch added to uv__thread_getname (returns
+  # UV_ENOSYS — there is no WASI thread-name introspection syscall).
+  #
+  # Real thread.c gives libuv a genuine worker threadpool:
+  # threadpool.c init_threads() calls uv_thread_create_ex once per
+  # worker and abort()s on any non-zero return. The previous
+  # wasi-bootstrap.c uv_thread_create_ex ENOSYS stub made that abort()
+  # fire the first time any async libuv primitive (e.g. uv_fs_open from
+  # an npm-cli.js NAPI binding) lazily initialized the pool. With real
+  # threads the pool initializes and npm-install runs. The duplicate
+  # single-threaded mutex / cond / sem / once / rwlock / thread no-op
+  # stubs were removed from wasi-bootstrap.c so there is no
+  # duplicate-symbol clash at link.
   list(APPEND uv_sources
     src/unix/core.c
     src/unix/fs.c
@@ -463,6 +487,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
     src/unix/process.c
     src/unix/signal.c
     src/unix/stream.c
+    src/unix/thread.c
     src/unix/tty.c
     src/unix/wasi.c
     src/unix/wasi-bootstrap.c)
