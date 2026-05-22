@@ -28,9 +28,6 @@
  *
  * What we stub in this file:
  *
- *   - Async handles (uv_async_init / send / close / fork / stop). Used
- *     for cross-thread wakeup, which the bootstrap path does not need.
- *
  *   - UDP (uv_udp_open / close). Out-of-scope for v1.
  *
  *   - Dynamic linking (uv_dlopen / dlerror / dlsym / dlclose). Out-of-
@@ -52,6 +49,13 @@
  *     succeed instead of abort()-ing on a uv_thread_create_ex ENOSYS
  *     stub (the cascade-7 npm-install SIGABRT). Re-stubbing those
  *     symbols here would clash with thread.c at link time.
+ *
+ *   - Async handles (uv_async_init / send / close / fork / stop).
+ *     src/unix/async.c is now in the WASI source list too. With a real
+ *     threadpool the worker's uv_async_send wakeup to the loop MUST
+ *     fire, otherwise the threadpool completion handshake deadlocks —
+ *     a no-op stub is no longer acceptable. async.c uses a self-pipe;
+ *     re-stubbing uv_async_* here would clash with it at link.
  *
  *   - Process title. WASI has no argv modification ABI; title ops
  *     are tracked in the common uv-common.c layer but need the
@@ -112,33 +116,22 @@ void uv__udp_finish_close(uv_udp_t* handle) {
 
 
 /* ========================================================================
- * Async
+ * Async — REAL implementation
+ *
+ * firebox#438: uv_async_init / uv_async_send / uv__async_close /
+ * uv__async_fork / uv__async_stop are NO LONGER stubbed here.
+ * src/unix/async.c (libuv's portable self-pipe async backend) is now in
+ * the WASI CMake source list.
+ *
+ * Why it became load-bearing: the threadpool worker, on finishing a
+ * job, calls uv_async_send(&loop->wq_async) to wake the event loop so
+ * it runs uv__work_done(). The old no-op uv_async_send stub meant a
+ * REAL threadpool worker completed its job but the loop never learned
+ * of it — the main thread blocked forever on the threadpool completion
+ * handshake. async.c's real cross-thread wakeup (a self-pipe + the
+ * loop's posix-poll watcher) closes that. Re-stubbing any uv_async_*
+ * symbol here would clash with async.c at link.
  * ======================================================================== */
-
-int uv_async_init(uv_loop_t* loop, uv_async_t* handle, uv_async_cb async_cb) {
-  /* Match cmake-bootstrap.c: return success without wiring anything.
-   * Single-threaded WASI v1 has no foreign thread to wake up.
-   */
-  return 0;
-}
-
-
-int uv_async_send(uv_async_t* handle) {
-  return 0;
-}
-
-
-void uv__async_close(uv_async_t* handle) {
-}
-
-
-int uv__async_fork(uv_loop_t* loop) {
-  return 0;
-}
-
-
-void uv__async_stop(uv_loop_t* loop) {
-}
 
 
 /* ========================================================================

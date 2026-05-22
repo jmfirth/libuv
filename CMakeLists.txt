@@ -474,7 +474,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
   # single-threaded mutex / cond / sem / once / rwlock / thread no-op
   # stubs were removed from wasi-bootstrap.c so there is no
   # duplicate-symbol clash at link.
+  #
+  # firebox#438: src/unix/async.c IS ALSO in this list. The threadpool
+  # worker, on finishing a job, calls uv_async_send(&loop->wq_async)
+  # to wake the event loop so it runs uv__work_done(). The previous
+  # wasi-bootstrap.c uv_async_send stub was a no-op `return 0;` — so
+  # with a REAL threadpool the worker completed the job but the loop
+  # never learned of it, and the main thread blocked forever on the
+  # threadpool completion handshake. The real async.c implements the
+  # cross-thread wakeup over a self-pipe (uv__make_pipe + the loop's
+  # posix-poll watcher) — every primitive (pipe/poll/read/write) is in
+  # the WASI sysroot. The uv_async_* stubs were removed from
+  # wasi-bootstrap.c.
   list(APPEND uv_sources
+    src/unix/async.c
     src/unix/core.c
     src/unix/fs.c
     src/unix/loop.c
