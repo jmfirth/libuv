@@ -26,8 +26,67 @@
 #endif
 
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 
 #define MAX_THREADPOOL_SIZE 1024
+
+/* firebox#511 — libuv-worker-startup probe (cascade-9 RCA aid).
+ *
+ * Sibling to the wasmer-wasix `firebox_511_probe` module — the wasmer
+ * side traces `wasi_thread_start` entry / layout / pre-dispatch /
+ * dispatch_err; this side traces what the new worker thread actually
+ * reaches inside libuv's threadpool loop.
+ *
+ * #505's wave-13 evidence: the abort fires IMMEDIATELY after the
+ * wasmer-side `thread_spawn` event — before any tar-pipeline read. We
+ * need to know whether the worker even reaches `worker()` entry, makes
+ * it past `uv_thread_setname` / `uv_sem_post`, picks up its first work
+ * item, and (if so) what that work item is. Each of those steps is a
+ * separate candidate wedge.
+ *
+ * Gated by the same env var the wasmer side uses (FIREBOX_511_PROBE):
+ * setting it to anything other than empty / "0" / "false" / "off" flips
+ * the probe on for the whole run. Cached on first call to avoid a
+ * per-probe getenv (`getenv` is not async-signal-safe; running it from
+ * inside a worker thread that may itself be in mid-startup is the kind
+ * of incident this probe is supposed to catch, not cause).
+ *
+ * Output goes to stderr with a `[firebox-511 libuv/threadpool]` prefix
+ * so it's trivially grep-able from a transcript that also contains the
+ * `[firebox-511 wasmer/wasix/thread_spawn]` lines from the wasmer side.
+ *
+ * Cost when disabled: one byte load + branch. Cost when enabled:
+ * `fprintf(stderr, ...)` per probe call — fine for a debug-only build.
+ */
+static int firebox_511_probe_init = 0;
+static int firebox_511_probe_on = 0;
+
+static void firebox_511_probe_init_once(void) {
+  const char* v;
+  if (firebox_511_probe_init)
+    return;
+  v = getenv("FIREBOX_511_PROBE");
+  if (v != NULL && v[0] != '\0' &&
+      strcmp(v, "0") != 0 && strcmp(v, "false") != 0 &&
+      strcmp(v, "FALSE") != 0 && strcmp(v, "off") != 0 &&
+      strcmp(v, "OFF") != 0) {
+    firebox_511_probe_on = 1;
+  }
+  firebox_511_probe_init = 1;
+}
+
+/* Probe macro mirroring the wasmer-side `firebox_511!` shape so callers
+ * stay uniform. `__VA_ARGS__` carries the printf format + args. */
+#define FIREBOX_511_PROBE(...)                                                  \
+  do {                                                                          \
+    firebox_511_probe_init_once();                                              \
+    if (firebox_511_probe_on) {                                                 \
+      fprintf(stderr, "[firebox-511 libuv/threadpool] " __VA_ARGS__);           \
+      fputc('\n', stderr);                                                      \
+      fflush(stderr);                                                           \
+    }                                                                           \
+  } while (0)
 
 static uv_once_t once = UV_ONCE_INIT;
 static uv_cond_t cond;
@@ -47,6 +106,14 @@ static unsigned int slow_work_thread_threshold(void) {
 }
 
 static void uv__cancelled(struct uv__work* w) {
+  /* firebox#511 — this is one of libuv's two `abort()` paths that runs
+   * inside the worker. If a `[firebox-511] uv__cancelled-abort` line
+   * appears in a transcript, the worker received a cancelled work item
+   * (uv_cancel was called on a request that had already started
+   * executing). Surfacing the abort layer this way distinguishes
+   * cascade-9 from the well-understood uv_cancel-race shape. */
+  FIREBOX_511_PROBE("uv__cancelled-abort: w=%p — libuv aborting via uv__cancelled",
+                    (void*) w);
   abort();
 }
 
@@ -59,11 +126,21 @@ static void worker(void* arg) {
   struct uv__queue* q;
   int is_slow_work;
 
+  /* firebox#511 — earliest possible point inside the worker thread. If
+   * this line never appears in a `FIREBOX_511_PROBE=1` transcript but
+   * the wasmer-side `pre_dispatch` does, the wedge is in the runtime's
+   * thread-startup glue (stack mmap / sigaltstack / TLS init) and the
+   * worker is dying before reaching its own entry. */
+  FIREBOX_511_PROBE("worker: entry arg=%p", arg);
+
   uv_thread_setname("libuv-worker");
+  FIREBOX_511_PROBE("worker: post-setname");
   uv_sem_post((uv_sem_t*) arg);
+  FIREBOX_511_PROBE("worker: post-sem_post (handshake with init_threads complete)");
   arg = NULL;
 
   uv_mutex_lock(&mutex);
+  FIREBOX_511_PROBE("worker: post-initial-mutex_lock");
   for (;;) {
     /* `mutex` should always be locked at this point. */
 
@@ -74,12 +151,15 @@ static void worker(void* arg) {
             uv__queue_next(&run_slow_work_message) == &wq &&
             slow_io_work_running >= slow_work_thread_threshold())) {
       idle_threads += 1;
+      FIREBOX_511_PROBE("worker: cond_wait (idle_threads=%u)", idle_threads);
       uv_cond_wait(&cond, &mutex);
       idle_threads -= 1;
+      FIREBOX_511_PROBE("worker: cond_wait wake (idle_threads=%u)", idle_threads);
     }
 
     q = uv__queue_head(&wq);
     if (q == &exit_message) {
+      FIREBOX_511_PROBE("worker: exit_message received");
       uv_cond_signal(&cond);
       uv_mutex_unlock(&mutex);
       break;
@@ -120,7 +200,26 @@ static void worker(void* arg) {
     uv_mutex_unlock(&mutex);
 
     w = uv__queue_data(q, struct uv__work, wq);
+    /* firebox#511 — this is THE critical point: the worker has its first
+     * work item in hand and is about to call into the user-supplied
+     * `w->work` callback. If the abort fires AFTER "worker: entry" and
+     * BEFORE "work-item: pre-call", the wedge is in libuv's loop body
+     * (e.g. the queue-dispatch logic itself, or a cond/mutex race during
+     * wake). If it fires INSIDE `w->work(w)` — i.e. after "pre-call" and
+     * with no matching "post-call" — the wedge is in the work-item
+     * callback itself (the wasi-libc / uv_fs / napi glue).
+     *
+     * `w->work` is a function pointer; under wasi the wasm-fnptr-as-
+     * table-index lesson (see `class_lesson_wasm_fnptr_is_table_index_
+     * _not_address.md`) means we print the integer value so anyone
+     * grepping the transcript sees the same value libuv resolved via the
+     * indirect-call table.
+     */
+    FIREBOX_511_PROBE("work-item: pre-call work=%p w=%p loop=%p is_slow_work=%d",
+                      (void*) w->work, (void*) w, (void*) w->loop, is_slow_work);
     w->work(w);
+    FIREBOX_511_PROBE("work-item: post-call work=%p w=%p (work pointer now %p)",
+                      (void*) w->work, (void*) w, (void*) w->work);
 
     uv_mutex_lock(&w->loop->wq_mutex);
     w->work = NULL;  /* Signal uv_cancel() that the work req is done
@@ -231,12 +330,25 @@ static void init_threads(void) {
   config.flags = UV_THREAD_HAS_STACK_SIZE;
   config.stack_size = 8u << 20;  /* 8 MB */
 
-  for (i = 0; i < nthreads; i++)
-    if (uv_thread_create_ex(threads + i, &config, worker, &sem))
-      abort();
+  /* firebox#511 — covers init_threads bookkeeping: we record the planned
+   * pool size + stack size so a transcript with N worker entries can be
+   * verified against the expected N. */
+  FIREBOX_511_PROBE("init_threads: nthreads=%u stack_size=%zu", nthreads,
+                    (size_t) config.stack_size);
 
-  for (i = 0; i < nthreads; i++)
+  for (i = 0; i < nthreads; i++) {
+    FIREBOX_511_PROBE("init_threads: spawning worker[%u]", i);
+    if (uv_thread_create_ex(threads + i, &config, worker, &sem)) {
+      FIREBOX_511_PROBE("init_threads: uv_thread_create_ex FAILED for worker[%u] — aborting", i);
+      abort();
+    }
+  }
+
+  for (i = 0; i < nthreads; i++) {
+    FIREBOX_511_PROBE("init_threads: waiting for worker[%u] handshake", i);
     uv_sem_wait(&sem);
+  }
+  FIREBOX_511_PROBE("init_threads: all %u workers handshook", nthreads);
 
   uv_sem_destroy(&sem);
 }
