@@ -267,17 +267,31 @@ __attribute__((destructor))
 void uv__threadpool_cleanup(void) {
   unsigned int i;
 
-  if (nthreads == 0)
+  /* firebox#511 Phase 3A — process-shutdown threadpool cleanup. Logs the
+   * teardown handshake: post exit_message → join each worker. The abort()
+   * on uv_thread_join failure is a serious wedge candidate when the
+   * worker thread is in a weird state under host load. */
+  FIREBOX_511_PROBE("uv__threadpool_cleanup: entry nthreads=%u", nthreads);
+
+  if (nthreads == 0) {
+    FIREBOX_511_PROBE("uv__threadpool_cleanup: early-return (no threads)");
     return;
+  }
 
 #ifndef __MVS__
   /* TODO(gabylb) - zos: revisit when Woz compiler is available. */
+  FIREBOX_511_PROBE("uv__threadpool_cleanup: posting exit_message");
   post(&exit_message, UV__WORK_CPU);
 #endif
 
-  for (i = 0; i < nthreads; i++)
-    if (uv_thread_join(threads + i))
+  for (i = 0; i < nthreads; i++) {
+    FIREBOX_511_PROBE("uv__threadpool_cleanup: joining worker[%u]", i);
+    if (uv_thread_join(threads + i)) {
+      FIREBOX_511_PROBE("uv__threadpool_cleanup: uv_thread_join FAILED for worker[%u] — aborting", i);
       abort();
+    }
+    FIREBOX_511_PROBE("uv__threadpool_cleanup: joined worker[%u]", i);
+  }
 
   if (threads != default_threads)
     uv__free(threads);
@@ -380,11 +394,19 @@ void uv__work_submit(uv_loop_t* loop,
                      enum uv__work_kind kind,
                      void (*work)(struct uv__work* w),
                      void (*done)(struct uv__work* w, int status)) {
+  /* firebox#511 Phase 3A — main-thread work-submit. If we see
+   * `uv__work_submit: enter` but NO matching `uv__work_submit: post_done`,
+   * the abort fires either in uv_once/init_once (lazy threadpool init) or
+   * in post() (queue insertion + cond_signal). */
+  FIREBOX_511_PROBE("uv__work_submit: enter loop=%p w=%p kind=%d work=%p done=%p",
+                    (void*) loop, (void*) w, (int) kind, (void*) work, (void*) done);
   uv_once(&once, init_once);
+  FIREBOX_511_PROBE("uv__work_submit: post_once_done — about to assign and post");
   w->loop = loop;
   w->work = work;
   w->done = done;
   post(&w->wq, kind);
+  FIREBOX_511_PROBE("uv__work_submit: post_done w=%p", (void*) w);
 }
 
 
@@ -427,6 +449,12 @@ void uv__work_done(uv_async_t* handle) {
   int nevents;
 
   loop = container_of(handle, uv_loop_t, wq_async);
+  /* firebox#511 Phase 3A — main-thread entry into work_done. If the abort
+   * fires AFTER "uv__work_done: entry" but BEFORE "uv__work_done: done_call",
+   * the wedge is in queue/mutex teardown. If between "done_call" and
+   * "done_return", the wedge is in the user-level callback (w->done) and
+   * not in libuv itself. */
+  FIREBOX_511_PROBE("uv__work_done: entry handle=%p loop=%p", (void*) handle, (void*) loop);
   uv_mutex_lock(&loop->wq_mutex);
   uv__queue_move(&loop->wq, &wq);
   uv_mutex_unlock(&loop->wq_mutex);
@@ -439,9 +467,13 @@ void uv__work_done(uv_async_t* handle) {
 
     w = container_of(q, struct uv__work, wq);
     err = (w->work == uv__cancelled) ? UV_ECANCELED : 0;
+    FIREBOX_511_PROBE("uv__work_done: done_call w=%p done=%p err=%d",
+                      (void*) w, (void*) w->done, err);
     w->done(w, err);
+    FIREBOX_511_PROBE("uv__work_done: done_return w=%p", (void*) w);
     nevents++;
   }
+  FIREBOX_511_PROBE("uv__work_done: loop_drained nevents=%d", nevents);
 
   /* This check accomplishes 2 things:
    * 1. Even if the queue was empty, the call to uv__work_done() should count
