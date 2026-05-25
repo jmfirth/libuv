@@ -24,6 +24,7 @@
 #if !defined(_WIN32)
 # include "unix/internal.h"
 # include "unix/firebox-526-breadcrumb.h"  /* firebox#527 */
+# include "unix/firebox-548-probe.h"       /* firebox#548 */
 #endif
 
 #include <stdlib.h>
@@ -64,6 +65,13 @@ static void worker(void* arg) {
   uv_thread_setname("libuv-worker");
   uv_sem_post((uv_sem_t*) arg);
   arg = NULL;
+
+  /* firebox#548 probe: worker loop init. By this point the trampoline
+   * (uv__wasi_thread_trampoline) has already stamped firebox_548_self_tid;
+   * this event correlates the worker tid with the threadpool global
+   * mutex addr that's about to be contended. */
+  FIREBOX_548_PROBE_W("worker_init", 0);
+  FIREBOX_548_PROBE_M("worker_pool_mutex_addr", &mutex, 0);
 
   uv_mutex_lock(&mutex);
   for (;;) {

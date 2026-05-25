@@ -503,7 +503,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
     src/unix/thread.c
     src/unix/tty.c
     src/unix/wasi.c
-    src/unix/wasi-bootstrap.c)
+    src/unix/wasi-bootstrap.c
+    # firebox#548: libuv mutex/cv-lock state probe (gated by
+    # FIREBOX_548_PROBE=1 env var at runtime; off by default).
+    # Probes the uv_mutex_lock / uv_cond_wait / uv_thread_create
+    # surface where cascade-9 worker aborts originate per #545 P2
+    # finding C. See src/unix/firebox-548-probe.h for the schema.
+    src/unix/firebox-548-probe.c)
 endif()
 
 if(APPLE OR CMAKE_SYSTEM_NAME MATCHES "DragonFly|FreeBSD|Linux|NetBSD|OpenBSD")

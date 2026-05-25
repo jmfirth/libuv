@@ -22,6 +22,7 @@
 #include "uv.h"
 #include "internal.h"
 #include "firebox-526-breadcrumb.h"  /* firebox#527 */
+#include "firebox-548-probe.h"       /* firebox#548 */
 
 #include <pthread.h>
 #ifdef __OpenBSD__
@@ -165,7 +166,24 @@ static void* uv__wasi_thread_trampoline(void* p) {
   void (*entry)(void* arg) = ctx->entry;
   void* arg = ctx->arg;
   uv__free(ctx);
+  /* firebox#548: stamp cooperative TLS tid so probe events emitted
+   * by THIS worker carry a stable identifier. We use a monotonic
+   * counter for tid since pthread_self() is in the wedge actor
+   * surface (calling it could perturb the very thing we're probing).
+   * The counter is process-global, atomic-incremented per spawn.
+   * Raw uint64_t (not _Atomic) so __atomic_add_fetch's pointer-to-
+   * integer requirement is satisfied under -std=gnu90. */
+  {
+    static uint64_t firebox_548_next_tid = 1000;
+    uint64_t mytid = __atomic_add_fetch(&firebox_548_next_tid, 1,
+                                        __ATOMIC_RELAXED);
+    firebox_548_self_tid = mytid;
+    /* parent=0 (we don't know parent's tid without pthread_self);
+     * child=mytid; aux=0 */
+    FIREBOX_548_PROBE_T("worker_trampoline_start", 0, mytid, 0);
+  }
   entry(arg);
+  FIREBOX_548_PROBE_W("worker_trampoline_end", 0);
   return NULL;
 }
 #endif  /* __wasi__ */
@@ -437,7 +455,15 @@ void uv_mutex_destroy(uv_mutex_t* mutex) {
 
 
 void uv_mutex_lock(uv_mutex_t* mutex) {
-  if (pthread_mutex_lock(mutex)) {
+  /* firebox#548 probe: emit enter/exit so cascade-9 classification can
+   * see (a) which tid was about to attempt the lock, (b) the actual
+   * return value if pthread_mutex_lock returns non-zero. C90 forbids
+   * mid-block declarations, hence the `rc` at top. */
+  int rc;
+  FIREBOX_548_PROBE_M("mutex_lock_enter", mutex, 0);
+  rc = pthread_mutex_lock(mutex);
+  FIREBOX_548_PROBE_M("mutex_lock_exit", mutex, rc);
+  if (rc) {
     firebox_526_stamp("libuv:unix/thread.c:426:mutex_lock_fail");
     abort();
   }
@@ -447,7 +473,9 @@ void uv_mutex_lock(uv_mutex_t* mutex) {
 int uv_mutex_trylock(uv_mutex_t* mutex) {
   int err;
 
+  FIREBOX_548_PROBE_M("mutex_trylock_enter", mutex, 0);
   err = pthread_mutex_trylock(mutex);
+  FIREBOX_548_PROBE_M("mutex_trylock_exit", mutex, err);
   if (err) {
     if (err != EBUSY && err != EAGAIN) {
       firebox_526_stamp("libuv:unix/thread.c:436:mutex_trylock_unexpected_errno");
@@ -461,7 +489,11 @@ int uv_mutex_trylock(uv_mutex_t* mutex) {
 
 
 void uv_mutex_unlock(uv_mutex_t* mutex) {
-  if (pthread_mutex_unlock(mutex)) {
+  int rc;
+  FIREBOX_548_PROBE_M("mutex_unlock_enter", mutex, 0);
+  rc = pthread_mutex_unlock(mutex);
+  FIREBOX_548_PROBE_M("mutex_unlock_exit", mutex, rc);
+  if (rc) {
     firebox_526_stamp("libuv:unix/thread.c:446:mutex_unlock_fail");
     abort();
   }
@@ -907,14 +939,24 @@ void uv_cond_destroy(uv_cond_t* cond) {
 }
 
 void uv_cond_signal(uv_cond_t* cond) {
-  if (pthread_cond_signal(cond)) {
+  /* firebox#548 probe: emit signaller events so the wedge-side log
+   * shows the wake-handshake order (who signalled vs who woke). */
+  int rc;
+  FIREBOX_548_PROBE_C("cond_signal_enter", cond, NULL, 0);
+  rc = pthread_cond_signal(cond);
+  FIREBOX_548_PROBE_C("cond_signal_exit", cond, NULL, rc);
+  if (rc) {
     firebox_526_stamp("libuv:unix/thread.c:909:cond_signal_fail");
     abort();
   }
 }
 
 void uv_cond_broadcast(uv_cond_t* cond) {
-  if (pthread_cond_broadcast(cond)) {
+  int rc;
+  FIREBOX_548_PROBE_C("cond_broadcast_enter", cond, NULL, 0);
+  rc = pthread_cond_broadcast(cond);
+  FIREBOX_548_PROBE_C("cond_broadcast_exit", cond, NULL, rc);
+  if (rc) {
     firebox_526_stamp("libuv:unix/thread.c:914:cond_broadcast_fail");
     abort();
   }
@@ -942,7 +984,16 @@ void uv_cond_wait(uv_cond_t* cond, uv_mutex_t* mutex) {
 #else /* !(defined(__APPLE__) && defined(__MACH__)) */
 
 void uv_cond_wait(uv_cond_t* cond, uv_mutex_t* mutex) {
-  if (pthread_cond_wait(cond, mutex)) {
+  /* firebox#548 probe: emit enter/exit. The return value rc is the
+   * primary D3' classification signal — if non-zero, what exactly did
+   * pthread_cond_wait return? Probe-side, NOT __asyncify_state-side
+   * (per cycle-10 finding A: asyncify Unwind arm never fires for
+   * workers in this reproducer). */
+  int rc;
+  FIREBOX_548_PROBE_C("cond_wait_enter", cond, mutex, 0);
+  rc = pthread_cond_wait(cond, mutex);
+  FIREBOX_548_PROBE_C("cond_wait_exit", cond, mutex, rc);
+  if (rc) {
     firebox_526_stamp("libuv:unix/thread.c:940:cond_wait_fail");
     abort();
   }
