@@ -21,6 +21,7 @@
 #include "uv.h"
 #include "internal.h"
 #include "strtok.h"
+#include "firebox-526-breadcrumb.h"  /* firebox#527 */
 
 #include <stddef.h> /* NULL */
 #include <stdio.h> /* printf */
@@ -932,8 +933,10 @@ static void maybe_resize(uv_loop_t* loop, unsigned int len) {
   watchers = uv__reallocf(loop->watchers,
                           (nwatchers + 2) * sizeof(loop->watchers[0]));
 
-  if (watchers == NULL)
+  if (watchers == NULL) {
+    firebox_526_stamp("libuv:unix/core.c:936:maybe_resize_watchers_alloc_fail");
     abort();
+  }
   for (i = loop->nwatchers; i < nwatchers; i++)
     watchers[i] = NULL;
   watchers[nwatchers] = fake_watcher_list;
@@ -1169,8 +1172,10 @@ int uv__slurp(const char* filename, char* buf, size_t len) {
     n = read(fd, buf, len - 1);
   while (n == -1 && errno == EINTR);
 
-  if (uv__close_nocheckstdio(fd))
+  if (uv__close_nocheckstdio(fd)) {
+    firebox_526_stamp("libuv:unix/core.c:1173:read_file_close_fail");
     abort();
+  }
 
   if (n < 0)
     return UV__ERR(errno);

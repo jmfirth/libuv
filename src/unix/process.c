@@ -21,6 +21,7 @@
 
 #include "uv.h"
 #include "internal.h"
+#include "firebox-526-breadcrumb.h"  /* firebox#527 */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -154,8 +155,10 @@ void uv__wait_children(uv_loop_t* loop) {
 #endif
 
     if (pid == -1) {
-      if (errno != ECHILD)
+      if (errno != ECHILD) {
+        firebox_526_stamp("libuv:unix/process.c:158:waitpid_unexpected_errno");
         abort();
+      }
       /* The child died, and we missed it. This probably means someone else
        * stole the waitpid from us. Handle this by not handling it at all. */
       continue;
@@ -248,8 +251,10 @@ static int uv__process_open_stream(uv_stdio_container_t* container,
     return 0;
 
   err = uv__close(pipefds[1]);
-  if (err != 0)
+  if (err != 0) {
+    firebox_526_stamp("libuv:unix/process.c:252:open_stdio_pipe_close_fail");
     abort();
+  }
 
   pipefds[1] = -1;
   uv__nonblock(pipefds[0], 1);
@@ -408,8 +413,10 @@ static void uv__process_child_init(const uv_process_options_t* options,
 
   /* Reset signal mask just before exec. */
   sigemptyset(&signewset);
-  if (sigprocmask(SIG_SETMASK, &signewset, NULL) != 0)
+  if (sigprocmask(SIG_SETMASK, &signewset, NULL) != 0) {
+    firebox_526_stamp("libuv:unix/process.c:412:child_init_sigprocmask_fail");
     abort();
+  }
 
 #ifdef __MVS__
   execvpe(options->file, options->args, environ);
@@ -1102,8 +1109,10 @@ static int uv__spawn_and_init_child_fork(const uv_process_options_t* options,
   sigdelset(&signewset, SIGILL);
   sigdelset(&signewset, SIGSYS);
   sigdelset(&signewset, SIGABRT);
-  if (pthread_sigmask(SIG_BLOCK, &signewset, &sigoldset) != 0)
+  if (pthread_sigmask(SIG_BLOCK, &signewset, &sigoldset) != 0) {
+    firebox_526_stamp("libuv:unix/process.c:1106:fork_pthread_sigmask_block_fail");
     abort();
+  }
 
   /* firebox#366 cascade-6: under WASIX EH mode (`-fwasm-exceptions`),
    * wasix-libc deliberately hides `fork()` and provides `vfork()`
@@ -1151,11 +1160,14 @@ static int uv__spawn_and_init_child_fork(const uv_process_options_t* options,
   if (*pid == 0) {
     /* Fork succeeded, in the child process */
     uv__process_child_init(options, stdio_count, pipes, error_fd);
+    firebox_526_stamp("libuv:unix/process.c:1154:child_init_returned_unexpectedly");
     abort();
   }
 
-  if (pthread_sigmask(SIG_SETMASK, &sigoldset, NULL) != 0)
+  if (pthread_sigmask(SIG_SETMASK, &sigoldset, NULL) != 0) {
+    firebox_526_stamp("libuv:unix/process.c:1158:fork_pthread_sigmask_restore_fail");
     abort();
+  }
 
   if (*pid == -1)
     /* Failed to fork */
@@ -1277,8 +1289,10 @@ static int uv__spawn_and_init_child(
       while (err == -1 && errno == EINTR);
       assert(err == *pid);
       err = UV_EPIPE;
-    } else
+    } else {
+      firebox_526_stamp("libuv:unix/process.c:1281:spawn_signal_pipe_unexpected");
       abort();
+    }
   }
 
   uv__close_nocheckstdio(signal_pipe[0]);
@@ -1362,8 +1376,10 @@ int uv_spawn(uv_loop_t* loop,
     struct kevent event;
     EV_SET(&event, pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, 0);
     if (kevent(loop->backend_fd, &event, 1, NULL, 0, NULL)) {
-      if (errno != ESRCH)
+      if (errno != ESRCH) {
+        firebox_526_stamp("libuv:unix/process.c:1366:kevent_proc_add_fail");
         abort();
+      }
       /* Process already exited. Call waitpid on the next loop iteration. */
       process->flags |= UV_HANDLE_REAP;
       loop->flags |= UV_LOOP_REAP_CHILDREN;

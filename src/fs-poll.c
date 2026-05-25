@@ -28,6 +28,7 @@
 #define uv__make_close_pending(h) uv__want_endgame((h)->loop, (h))
 #else
 #include "unix/internal.h"
+#include "unix/firebox-526-breadcrumb.h"  /* firebox#527 */
 #endif
 
 #include <assert.h>
@@ -180,8 +181,12 @@ static void timer_cb(uv_timer_t* timer) {
   assert(ctx->parent_handle->poll_ctx == ctx);
   ctx->start_time = uv_now(ctx->loop);
 
-  if (uv_fs_stat(ctx->loop, &ctx->fs_req, ctx->path, poll_cb))
+  if (uv_fs_stat(ctx->loop, &ctx->fs_req, ctx->path, poll_cb)) {
+#ifndef _WIN32
+    firebox_526_stamp("libuv:fs-poll.c:184:timer_cb_fs_stat_fail");
+#endif
     abort();
+  }
 }
 
 
@@ -229,8 +234,12 @@ out:
   interval = ctx->interval;
   interval -= (uv_now(ctx->loop) - ctx->start_time) % interval;
 
-  if (uv_timer_start(&ctx->timer_handle, timer_cb, interval, 0))
+  if (uv_timer_start(&ctx->timer_handle, timer_cb, interval, 0)) {
+#ifndef _WIN32
+    firebox_526_stamp("libuv:fs-poll.c:233:poll_cb_timer_start_fail");
+#endif
     abort();
+  }
 }
 
 

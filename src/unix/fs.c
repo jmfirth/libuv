@@ -28,6 +28,7 @@
 
 #include "uv.h"
 #include "internal.h"
+#include "firebox-526-breadcrumb.h"  /* firebox#527 */
 
 #include <errno.h>
 #include <dlfcn.h>
@@ -353,8 +354,10 @@ static int uv__fs_mkstemp(uv_fs_t* req) {
    */
   if (r >= 0 && uv__cloexec(r, 1) != 0) {
     r = uv__close(r);
-    if (r != 0)
+    if (r != 0) {
+      firebox_526_stamp("libuv:unix/fs.c:357:open_temp_cloexec_close_fail");
       abort();
+    }
     r = -1;
   }
 
@@ -384,8 +387,10 @@ static ssize_t uv__fs_open(uv_fs_t* req) {
    */
   if (r >= 0 && uv__cloexec(r, 1) != 0) {
     r = uv__close(r);
-    if (r != 0)
+    if (r != 0) {
+      firebox_526_stamp("libuv:unix/fs.c:388:fs_open_cloexec_close_fail");
       abort();
+    }
     r = -1;
   }
 
@@ -1749,7 +1754,9 @@ static void uv__fs_work(struct uv__work* w) {
     X(UNLINK, unlink(req->path));
     X(UTIME, uv__fs_utime(req));
     X(WRITE, uv__fs_write_all(req));
-    default: abort();
+    default:
+      firebox_526_stamp("libuv:unix/fs.c:1752:work_dispatch_unknown_op");
+      abort();
     }
 #undef X
   } while (r == -1 && errno == EINTR && retry_on_eintr);

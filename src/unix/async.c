@@ -24,6 +24,7 @@
 
 #include "uv.h"
 #include "internal.h"
+#include "firebox-526-breadcrumb.h"  /* firebox#527 */
 
 #include <errno.h>
 #include <stdatomic.h>
@@ -186,6 +187,7 @@ static void uv__async_io(uv_loop_t* loop, uv__io_t* w, unsigned int events) {
     if (errno == EINTR)
       continue;
 
+    firebox_526_stamp("libuv:unix/async.c:189:async_io_read_unexpected_errno");
     abort();
   }
 
@@ -236,6 +238,7 @@ static void uv__async_send(uv_loop_t* loop) {
     r = kevent(loop->backend_fd, &ev, 1, NULL, 0, NULL);
     if (r == 0)
       return;
+    firebox_526_stamp("libuv:unix/async.c:239:async_send_kevent_fail");
     abort();
   }
 #endif
@@ -251,6 +254,7 @@ static void uv__async_send(uv_loop_t* loop) {
     if (errno == EAGAIN || errno == EWOULDBLOCK)
       return;
 
+  firebox_526_stamp("libuv:unix/async.c:254:async_send_write_unexpected");
   abort();
 }
 

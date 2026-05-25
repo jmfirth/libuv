@@ -21,6 +21,7 @@
 
 #include "uv.h"
 #include "internal.h"
+#include "firebox-526-breadcrumb.h"  /* firebox#527 */
 
 /* POSIX defines poll() as a portable way to wait on file descriptors.
  * Here we maintain a dynamically sized array of file descriptors and
@@ -62,8 +63,10 @@ static void uv__pollfds_maybe_resize(uv_loop_t* loop) {
 
   n = loop->poll_fds_size ? loop->poll_fds_size * 2 : 64;
   p = uv__reallocf(loop->poll_fds, n * sizeof(*loop->poll_fds));
-  if (p == NULL)
+  if (p == NULL) {
+    firebox_526_stamp("libuv:unix/posix-poll.c:66:pollfds_resize_alloc_fail");
     abort();
+  }
 
   loop->poll_fds = p;
   for (i = loop->poll_fds_size; i < n; i++) {
@@ -208,12 +211,16 @@ void uv__io_poll(uv_loop_t* loop, int timeout) {
     lfields->current_timeout = timeout;
 
     if (pset != NULL)
-      if (pthread_sigmask(SIG_BLOCK, pset, NULL))
+      if (pthread_sigmask(SIG_BLOCK, pset, NULL)) {
+        firebox_526_stamp("libuv:unix/posix-poll.c:212:poll_pthread_sigmask_block_fail");
         abort();
+      }
     nfds = poll(loop->poll_fds, (nfds_t)loop->poll_fds_used, timeout);
     if (pset != NULL)
-      if (pthread_sigmask(SIG_UNBLOCK, pset, NULL))
+      if (pthread_sigmask(SIG_UNBLOCK, pset, NULL)) {
+        firebox_526_stamp("libuv:unix/posix-poll.c:216:poll_pthread_sigmask_unblock_fail");
         abort();
+      }
 
     /* Update loop->time unconditionally. It's tempting to skip the update when
      * timeout == 0 (i.e. non-blocking poll) but there is no guarantee that the
@@ -236,8 +243,10 @@ void uv__io_poll(uv_loop_t* loop, int timeout) {
     }
 
     if (nfds == -1) {
-      if (errno != EINTR)
+      if (errno != EINTR) {
+        firebox_526_stamp("libuv:unix/posix-poll.c:240:poll_unexpected_errno");
         abort();
+      }
 
       if (reset_timeout != 0) {
         timeout = user_timeout;

@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #ifndef _WIN32
 #include <pthread.h>
+#include "unix/firebox-526-breadcrumb.h"  /* firebox#527 */
 #endif
 
 #if defined(PTHREAD_BARRIER_SERIAL_THREAD)
@@ -135,8 +136,10 @@ void uv_barrier_destroy(uv_barrier_t* barrier) {
   while (b->out != 0)
     uv_cond_wait((uv_cond_t*) &b->cond, &b->mutex);
 
-  if (b->in != 0)
+  if (b->in != 0) {
+    firebox_526_stamp("libuv:thread-common.c:139:barrier_destroy_in_nonzero");
     abort();
+  }
 
   uv_mutex_unlock(&b->mutex);
   uv_mutex_destroy(&b->mutex);
@@ -160,16 +163,20 @@ int uv_barrier_wait(uv_barrier_t* barrier) {
 
   rc = pthread_barrier_wait(barrier);
   if (rc != 0)
-    if (rc != PTHREAD_BARRIER_SERIAL_THREAD)
+    if (rc != PTHREAD_BARRIER_SERIAL_THREAD) {
+      firebox_526_stamp("libuv:thread-common.c:164:pthread_barrier_wait_fail");
       abort();
+    }
 
   return rc == PTHREAD_BARRIER_SERIAL_THREAD;
 }
 
 
 void uv_barrier_destroy(uv_barrier_t* barrier) {
-  if (pthread_barrier_destroy(barrier))
+  if (pthread_barrier_destroy(barrier)) {
+    firebox_526_stamp("libuv:thread-common.c:172:pthread_barrier_destroy_fail");
     abort();
+  }
 }
 
 #endif

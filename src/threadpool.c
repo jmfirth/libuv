@@ -23,6 +23,7 @@
 
 #if !defined(_WIN32)
 # include "unix/internal.h"
+# include "unix/firebox-526-breadcrumb.h"  /* firebox#527 */
 #endif
 
 #include <stdlib.h>
@@ -47,6 +48,7 @@ static unsigned int slow_work_thread_threshold(void) {
 }
 
 static void uv__cancelled(struct uv__work* w) {
+  firebox_526_stamp("libuv:threadpool.c:50:uv__cancelled_called");
   abort();
 }
 
@@ -177,8 +179,10 @@ void uv__threadpool_cleanup(void) {
 #endif
 
   for (i = 0; i < nthreads; i++)
-    if (uv_thread_join(threads + i))
+    if (uv_thread_join(threads + i)) {
+      firebox_526_stamp("libuv:threadpool.c:181:cleanup_thread_join_fail");
       abort();
+    }
 
   if (threads != default_threads)
     uv__free(threads);
@@ -215,25 +219,33 @@ static void init_threads(void) {
     }
   }
 
-  if (uv_cond_init(&cond))
+  if (uv_cond_init(&cond)) {
+    firebox_526_stamp("libuv:threadpool.c:219:init_threads_cond_init_fail");
     abort();
+  }
 
-  if (uv_mutex_init(&mutex))
+  if (uv_mutex_init(&mutex)) {
+    firebox_526_stamp("libuv:threadpool.c:222:init_threads_mutex_init_fail");
     abort();
+  }
 
   uv__queue_init(&wq);
   uv__queue_init(&slow_io_pending_wq);
   uv__queue_init(&run_slow_work_message);
 
-  if (uv_sem_init(&sem, 0))
+  if (uv_sem_init(&sem, 0)) {
+    firebox_526_stamp("libuv:threadpool.c:229:init_threads_sem_init_fail");
     abort();
+  }
 
   config.flags = UV_THREAD_HAS_STACK_SIZE;
   config.stack_size = 8u << 20;  /* 8 MB */
 
   for (i = 0; i < nthreads; i++)
-    if (uv_thread_create_ex(threads + i, &config, worker, &sem))
+    if (uv_thread_create_ex(threads + i, &config, worker, &sem)) {
+      firebox_526_stamp("libuv:threadpool.c:236:init_threads_thread_create_fail");
       abort();
+    }
 
   for (i = 0; i < nthreads; i++)
     uv_sem_wait(&sem);
@@ -256,8 +268,10 @@ static void init_once(void) {
    * Note that this discards the global mutex and condition as well
    * as the work queue.
    */
-  if (pthread_atfork(NULL, NULL, &reset_once))
+  if (pthread_atfork(NULL, NULL, &reset_once)) {
+    firebox_526_stamp("libuv:threadpool.c:260:init_once_pthread_atfork_fail");
     abort();
+  }
 #endif
   init_threads();
 }

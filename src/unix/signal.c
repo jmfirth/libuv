@@ -20,6 +20,7 @@
 
 #include "uv.h"
 #include "internal.h"
+#include "firebox-526-breadcrumb.h"  /* firebox#527 */
 
 #include <assert.h>
 #include <errno.h>
@@ -70,8 +71,10 @@ static void uv__signal_global_init(void) {
      * it the handler functions will be called multiple times. Thus
      * we only want to do it once.
      */
-    if (pthread_atfork(NULL, NULL, &uv__signal_global_reinit))
+    if (pthread_atfork(NULL, NULL, &uv__signal_global_reinit)) {
+      firebox_526_stamp("libuv:unix/signal.c:74:global_init_atfork_fail");
       abort();
+    }
 
   uv__signal_global_reinit();
 }
@@ -100,11 +103,15 @@ void uv__signal_cleanup(void) {
 static void uv__signal_global_reinit(void) {
   uv__signal_cleanup();
 
-  if (uv__make_pipe(uv__signal_lock_pipefd, 0))
+  if (uv__make_pipe(uv__signal_lock_pipefd, 0)) {
+    firebox_526_stamp("libuv:unix/signal.c:104:global_reinit_make_pipe_fail");
     abort();
+  }
 
-  if (uv__signal_unlock())
+  if (uv__signal_unlock()) {
+    firebox_526_stamp("libuv:unix/signal.c:107:global_reinit_signal_unlock_fail");
     abort();
+  }
 }
 
 
@@ -140,25 +147,35 @@ static int uv__signal_unlock(void) {
 static void uv__signal_block_and_lock(sigset_t* saved_sigmask) {
   sigset_t new_mask;
 
-  if (sigfillset(&new_mask))
+  if (sigfillset(&new_mask)) {
+    firebox_526_stamp("libuv:unix/signal.c:144:block_and_lock_sigfillset_fail");
     abort();
+  }
 
   /* to shut up valgrind */
   sigemptyset(saved_sigmask);
-  if (pthread_sigmask(SIG_SETMASK, &new_mask, saved_sigmask))
+  if (pthread_sigmask(SIG_SETMASK, &new_mask, saved_sigmask)) {
+    firebox_526_stamp("libuv:unix/signal.c:149:block_and_lock_pthread_sigmask_fail");
     abort();
+  }
 
-  if (uv__signal_lock())
+  if (uv__signal_lock()) {
+    firebox_526_stamp("libuv:unix/signal.c:152:block_and_lock_signal_lock_fail");
     abort();
+  }
 }
 
 
 static void uv__signal_unlock_and_unblock(sigset_t* saved_sigmask) {
-  if (uv__signal_unlock())
+  if (uv__signal_unlock()) {
+    firebox_526_stamp("libuv:unix/signal.c:158:unlock_signal_unlock_fail");
     abort();
+  }
 
-  if (pthread_sigmask(SIG_SETMASK, saved_sigmask, NULL))
+  if (pthread_sigmask(SIG_SETMASK, saved_sigmask, NULL)) {
+    firebox_526_stamp("libuv:unix/signal.c:161:unlock_pthread_sigmask_restore_fail");
     abort();
+  }
 }
 
 
@@ -227,8 +244,10 @@ static int uv__signal_register_handler(int signum, int oneshot) {
 
   /* XXX use a separate signal stack? */
   memset(&sa, 0, sizeof(sa));
-  if (sigfillset(&sa.sa_mask))
+  if (sigfillset(&sa.sa_mask)) {
+    firebox_526_stamp("libuv:unix/signal.c:231:register_handler_sigfillset_fail");
     abort();
+  }
   sa.sa_handler = uv__signal_handler;
   sa.sa_flags = SA_RESTART;
   if (oneshot)
@@ -253,8 +272,10 @@ static void uv__signal_unregister_handler(int signum) {
    * signal implies that it was successfully registered earlier, so EINVAL
    * should never happen.
    */
-  if (sigaction(signum, &sa, NULL))
+  if (sigaction(signum, &sa, NULL)) {
+    firebox_526_stamp("libuv:unix/signal.c:257:unregister_handler_sigaction_fail");
     abort();
+  }
 }
 
 
@@ -461,8 +482,10 @@ static void uv__signal_event(uv_loop_t* loop,
     }
 
     /* Other errors really should never happen. */
-    if (r == -1)
+    if (r == -1) {
+      firebox_526_stamp("libuv:unix/signal.c:465:signal_event_read_unexpected");
       abort();
+    }
 
     bytes += r;
 

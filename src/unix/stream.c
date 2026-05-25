@@ -21,6 +21,7 @@
 
 #include "uv.h"
 #include "internal.h"
+#include "firebox-526-breadcrumb.h"  /* firebox#527 */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -185,6 +186,7 @@ static void uv__stream_osx_select(void* arg) {
         continue;
 
       /* XXX: Possible?! */
+      firebox_526_stamp("libuv:unix/stream.c:188:emfile_select_unexpected");
       abort();
     }
 
@@ -209,6 +211,7 @@ static void uv__stream_osx_select(void* arg) {
         if (errno == EINTR)
           continue;
 
+        firebox_526_stamp("libuv:unix/stream.c:212:emfile_socketpair_read_unexpected");
         abort();
       }
 

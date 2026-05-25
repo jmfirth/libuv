@@ -21,6 +21,7 @@
 
 #include "uv.h"
 #include "internal.h"
+#include "firebox-526-breadcrumb.h"  /* firebox#527 */
 
 #include <pthread.h>
 #ifdef __OpenBSD__
@@ -199,11 +200,15 @@ int uv_thread_create_ex(uv_thread_t* tid,
   if (stack_size > 0) {
     attr = &attr_storage;
 
-    if (pthread_attr_init(attr))
+    if (pthread_attr_init(attr)) {
+      firebox_526_stamp("libuv:unix/thread.c:203:thread_create_attr_init_fail");
       abort();
+    }
 
-    if (pthread_attr_setstacksize(attr, stack_size))
+    if (pthread_attr_setstacksize(attr, stack_size)) {
+      firebox_526_stamp("libuv:unix/thread.c:206:thread_create_attr_setstacksize_fail");
       abort();
+    }
   }
 
 #ifdef __wasi__
@@ -376,16 +381,22 @@ int uv_mutex_init(uv_mutex_t* mutex) {
   pthread_mutexattr_t attr;
   int err;
 
-  if (pthread_mutexattr_init(&attr))
+  if (pthread_mutexattr_init(&attr)) {
+    firebox_526_stamp("libuv:unix/thread.c:384:mutex_init_attr_init_fail");
     abort();
+  }
 
-  if (pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK))
+  if (pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK)) {
+    firebox_526_stamp("libuv:unix/thread.c:387:mutex_init_attr_settype_errorcheck_fail");
     abort();
+  }
 
   err = pthread_mutex_init(mutex, &attr);
 
-  if (pthread_mutexattr_destroy(&attr))
+  if (pthread_mutexattr_destroy(&attr)) {
+    firebox_526_stamp("libuv:unix/thread.c:392:mutex_init_attr_destroy_fail");
     abort();
+  }
 
   return UV__ERR(err);
 #endif
@@ -396,30 +407,40 @@ int uv_mutex_init_recursive(uv_mutex_t* mutex) {
   pthread_mutexattr_t attr;
   int err;
 
-  if (pthread_mutexattr_init(&attr))
+  if (pthread_mutexattr_init(&attr)) {
+    firebox_526_stamp("libuv:unix/thread.c:404:mutex_init_recursive_attr_init_fail");
     abort();
+  }
 
-  if (pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE))
+  if (pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE)) {
+    firebox_526_stamp("libuv:unix/thread.c:407:mutex_init_recursive_attr_settype_fail");
     abort();
+  }
 
   err = pthread_mutex_init(mutex, &attr);
 
-  if (pthread_mutexattr_destroy(&attr))
+  if (pthread_mutexattr_destroy(&attr)) {
+    firebox_526_stamp("libuv:unix/thread.c:412:mutex_init_recursive_attr_destroy_fail");
     abort();
+  }
 
   return UV__ERR(err);
 }
 
 
 void uv_mutex_destroy(uv_mutex_t* mutex) {
-  if (pthread_mutex_destroy(mutex))
+  if (pthread_mutex_destroy(mutex)) {
+    firebox_526_stamp("libuv:unix/thread.c:420:mutex_destroy_fail");
     abort();
+  }
 }
 
 
 void uv_mutex_lock(uv_mutex_t* mutex) {
-  if (pthread_mutex_lock(mutex))
+  if (pthread_mutex_lock(mutex)) {
+    firebox_526_stamp("libuv:unix/thread.c:426:mutex_lock_fail");
     abort();
+  }
 }
 
 
@@ -428,8 +449,10 @@ int uv_mutex_trylock(uv_mutex_t* mutex) {
 
   err = pthread_mutex_trylock(mutex);
   if (err) {
-    if (err != EBUSY && err != EAGAIN)
+    if (err != EBUSY && err != EAGAIN) {
+      firebox_526_stamp("libuv:unix/thread.c:436:mutex_trylock_unexpected_errno");
       abort();
+    }
     return UV_EBUSY;
   }
 
@@ -438,8 +461,10 @@ int uv_mutex_trylock(uv_mutex_t* mutex) {
 
 
 void uv_mutex_unlock(uv_mutex_t* mutex) {
-  if (pthread_mutex_unlock(mutex))
+  if (pthread_mutex_unlock(mutex)) {
+    firebox_526_stamp("libuv:unix/thread.c:446:mutex_unlock_fail");
     abort();
+  }
 }
 
 
@@ -449,14 +474,18 @@ int uv_rwlock_init(uv_rwlock_t* rwlock) {
 
 
 void uv_rwlock_destroy(uv_rwlock_t* rwlock) {
-  if (pthread_rwlock_destroy(rwlock))
+  if (pthread_rwlock_destroy(rwlock)) {
+    firebox_526_stamp("libuv:unix/thread.c:478:rwlock_destroy_fail");
     abort();
+  }
 }
 
 
 void uv_rwlock_rdlock(uv_rwlock_t* rwlock) {
-  if (pthread_rwlock_rdlock(rwlock))
+  if (pthread_rwlock_rdlock(rwlock)) {
+    firebox_526_stamp("libuv:unix/thread.c:484:rwlock_rdlock_fail");
     abort();
+  }
 }
 
 
@@ -465,8 +494,10 @@ int uv_rwlock_tryrdlock(uv_rwlock_t* rwlock) {
 
   err = pthread_rwlock_tryrdlock(rwlock);
   if (err) {
-    if (err != EBUSY && err != EAGAIN)
+    if (err != EBUSY && err != EAGAIN) {
+      firebox_526_stamp("libuv:unix/thread.c:494:rwlock_tryrdlock_unexpected_errno");
       abort();
+    }
     return UV_EBUSY;
   }
 
@@ -475,14 +506,18 @@ int uv_rwlock_tryrdlock(uv_rwlock_t* rwlock) {
 
 
 void uv_rwlock_rdunlock(uv_rwlock_t* rwlock) {
-  if (pthread_rwlock_unlock(rwlock))
+  if (pthread_rwlock_unlock(rwlock)) {
+    firebox_526_stamp("libuv:unix/thread.c:504:rwlock_rdunlock_fail");
     abort();
+  }
 }
 
 
 void uv_rwlock_wrlock(uv_rwlock_t* rwlock) {
-  if (pthread_rwlock_wrlock(rwlock))
+  if (pthread_rwlock_wrlock(rwlock)) {
+    firebox_526_stamp("libuv:unix/thread.c:510:rwlock_wrlock_fail");
     abort();
+  }
 }
 
 
@@ -491,8 +526,10 @@ int uv_rwlock_trywrlock(uv_rwlock_t* rwlock) {
 
   err = pthread_rwlock_trywrlock(rwlock);
   if (err) {
-    if (err != EBUSY && err != EAGAIN)
+    if (err != EBUSY && err != EAGAIN) {
+      firebox_526_stamp("libuv:unix/thread.c:520:rwlock_trywrlock_unexpected_errno");
       abort();
+    }
     return UV_EBUSY;
   }
 
@@ -501,14 +538,18 @@ int uv_rwlock_trywrlock(uv_rwlock_t* rwlock) {
 
 
 void uv_rwlock_wrunlock(uv_rwlock_t* rwlock) {
-  if (pthread_rwlock_unlock(rwlock))
+  if (pthread_rwlock_unlock(rwlock)) {
+    firebox_526_stamp("libuv:unix/thread.c:530:rwlock_wrunlock_fail");
     abort();
+  }
 }
 
 
 void uv_once(uv_once_t* guard, void (*callback)(void)) {
-  if (pthread_once(guard, callback))
+  if (pthread_once(guard, callback)) {
+    firebox_526_stamp("libuv:unix/thread.c:536:once_fail");
     abort();
+  }
 }
 
 #if defined(__APPLE__) && defined(__MACH__)
@@ -698,14 +739,18 @@ static int uv__sem_init(uv_sem_t* sem, unsigned int value) {
 
 
 static void uv__sem_destroy(uv_sem_t* sem) {
-  if (sem_destroy(sem))
+  if (sem_destroy(sem)) {
+    firebox_526_stamp("libuv:unix/thread.c:743:sem_destroy_fail");
     abort();
+  }
 }
 
 
 static void uv__sem_post(uv_sem_t* sem) {
-  if (sem_post(sem))
+  if (sem_post(sem)) {
+    firebox_526_stamp("libuv:unix/thread.c:749:sem_post_fail");
     abort();
+  }
 }
 
 
@@ -716,8 +761,10 @@ static void uv__sem_wait(uv_sem_t* sem) {
     r = sem_wait(sem);
   while (r == -1 && errno == EINTR);
 
-  if (r)
+  if (r) {
+    firebox_526_stamp("libuv:unix/thread.c:761:sem_wait_fail");
     abort();
+  }
 }
 
 
@@ -731,6 +778,7 @@ static int uv__sem_trywait(uv_sem_t* sem) {
   if (r) {
     if (errno == EAGAIN)
       return UV_EAGAIN;
+    firebox_526_stamp("libuv:unix/thread.c:775:sem_trywait_unexpected_errno");
     abort();
   }
 
@@ -852,18 +900,24 @@ void uv_cond_destroy(uv_cond_t* cond) {
     abort();
 #endif /* defined(__APPLE__) && defined(__MACH__) */
 
-  if (pthread_cond_destroy(cond))
+  if (pthread_cond_destroy(cond)) {
+    firebox_526_stamp("libuv:unix/thread.c:904:cond_destroy_fail");
     abort();
+  }
 }
 
 void uv_cond_signal(uv_cond_t* cond) {
-  if (pthread_cond_signal(cond))
+  if (pthread_cond_signal(cond)) {
+    firebox_526_stamp("libuv:unix/thread.c:909:cond_signal_fail");
     abort();
+  }
 }
 
 void uv_cond_broadcast(uv_cond_t* cond) {
-  if (pthread_cond_broadcast(cond))
+  if (pthread_cond_broadcast(cond)) {
+    firebox_526_stamp("libuv:unix/thread.c:914:cond_broadcast_fail");
     abort();
+  }
 }
 
 #if defined(__APPLE__) && defined(__MACH__)
@@ -888,8 +942,10 @@ void uv_cond_wait(uv_cond_t* cond, uv_mutex_t* mutex) {
 #else /* !(defined(__APPLE__) && defined(__MACH__)) */
 
 void uv_cond_wait(uv_cond_t* cond, uv_mutex_t* mutex) {
-  if (pthread_cond_wait(cond, mutex))
+  if (pthread_cond_wait(cond, mutex)) {
+    firebox_526_stamp("libuv:unix/thread.c:940:cond_wait_fail");
     abort();
+  }
 }
 
 #endif
@@ -925,6 +981,7 @@ int uv_cond_timedwait(uv_cond_t* cond, uv_mutex_t* mutex, uint64_t timeout) {
   if (r == ETIMEDOUT)
     return UV_ETIMEDOUT;
 
+  firebox_526_stamp("libuv:unix/thread.c:978:cond_timedwait_unexpected_errno");
   abort();
 #ifndef __SUNPRO_C
   return UV_EINVAL;  /* Satisfy the compiler. */
@@ -938,8 +995,10 @@ int uv_key_create(uv_key_t* key) {
 
 
 void uv_key_delete(uv_key_t* key) {
-  if (pthread_key_delete(*key))
+  if (pthread_key_delete(*key)) {
+    firebox_526_stamp("libuv:unix/thread.c:991:key_delete_fail");
     abort();
+  }
 }
 
 
@@ -949,8 +1008,10 @@ void* uv_key_get(uv_key_t* key) {
 
 
 void uv_key_set(uv_key_t* key, void* value) {
-  if (pthread_setspecific(*key, value))
+  if (pthread_setspecific(*key, value)) {
+    firebox_526_stamp("libuv:unix/thread.c:1003:key_set_fail");
     abort();
+  }
 }
 
 #if defined(_AIX) || defined(__MVS__) || defined(__PASE__)

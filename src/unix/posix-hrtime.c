@@ -21,6 +21,7 @@
 
 #include "uv.h"
 #include "internal.h"
+#include "firebox-526-breadcrumb.h"  /* firebox#527 */
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -29,8 +30,10 @@
 uint64_t uv__hrtime(uv_clocktype_t type) {
   struct timespec t;
 
-  if (clock_gettime(CLOCK_MONOTONIC, &t))
+  if (clock_gettime(CLOCK_MONOTONIC, &t)) {
+    firebox_526_stamp("libuv:unix/posix-hrtime.c:33:clock_gettime_fail");
     abort();
+  }
 
   return t.tv_sec * (uint64_t) 1e9 + t.tv_nsec;
 }
