@@ -34,9 +34,11 @@
  *     uv_poll_start / uv_poll_stop). Out-of-scope for v1; TCP fds
  *     poll via posix-poll.c directly.
  *
- *   - DNS resolution (uv_getaddrinfo / uv_freeaddrinfo /
- *     uv_getnameinfo). Out-of-scope for v1; will be wired in #577
- *     §13.5 once the underlying wasix-libc DNS resolver lands.
+ *   - uv_getnameinfo (reverse DNS — sockaddr → host string). Out-of-
+ *     scope for v1; needs a future wasix-libc/host-import wireup for
+ *     the reverse path. (firebox#592 wires forward DNS via
+ *     uv_getaddrinfo + getaddrinfo.c — see "What this file NO LONGER
+ *     stubs" block below.)
  *
  *   - Dynamic linking (uv_dlopen / dlerror / dlsym / dlclose). Out-of-
  *     scope for v1; our WASM binaries are statically linked.
@@ -54,6 +56,16 @@
  *     (errno=ENOSYS) so libuv falls through to rv=0 (scope_id
  *     unknown) — the v1 outbound-connect path uses IPv4 1.1.1.1 / DNS
  *     A-record addresses where the scope_id is irrelevant.
+ *
+ *   - if_indextoname / if_nametoindex. wasix-libc ships the <net/if.h>
+ *     header declarations but does NOT export the symbols (firebox#592
+ *     audit; no .o for either in libc.a). getaddrinfo.c references
+ *     if_indextoname from uv_if_indextoname; stub to return NULL +
+ *     errno=ENOSYS so uv_if_indextoname falls through to UV__ERR(errno).
+ *     The v1 DNS path (uv_getaddrinfo from Node's dns_wrap.cc / Edge.js
+ *     npm install) does NOT exercise this — it's only needed by the
+ *     network-interface enumeration surface, which Node exposes via
+ *     os.networkInterfaces() and isn't on the cascade-9 critical path.
  *
  * What this file NO LONGER stubs (firebox#438):
  *
@@ -113,6 +125,35 @@
  *     symbol here would clash with stream.c at link. listen/accept
  *     are linked but unexercised until §13.4 wires the inbound side.
  *
+ *   - Forward DNS resolution (uv_getaddrinfo / uv_freeaddrinfo /
+ *     uv_if_indextoname / uv_if_indextoiid /
+ *     uv__getaddrinfo_translate_error). firebox#592: src/unix/
+ *     getaddrinfo.c is now in the WASI CMake source list. The Firebox
+ *     wasix-libc sysroot exports real getaddrinfo / freeaddrinfo /
+ *     gai_strerror / getnameinfo via <netdb.h>; underneath, wasix-libc's
+ *     __lookup_name routes through the `__wasi_resolve` import
+ *     (wasix_32v1.resolve), implemented in the Firebox wasmer fork at
+ *     lib/wasix/src/syscalls/wasix/resolve.rs as an async host-side DNS
+ *     lookup. libuv's getaddrinfo.c thunks uv_getaddrinfo through
+ *     uv__work_submit(UV__WORK_SLOW_IO) onto the threadpool, where the
+ *     worker calls getaddrinfo(3) → __lookup_name → __wasi_resolve →
+ *     host resolver; uv__getaddrinfo_done then fires the user's
+ *     uv_getaddrinfo_cb on the loop thread via async.c's self-pipe
+ *     wakeup. Re-stubbing uv_getaddrinfo / uv_freeaddrinfo /
+ *     uv_if_indextoname / uv_if_indextoiid /
+ *     uv__getaddrinfo_translate_error here would clash with
+ *     getaddrinfo.c at link.
+ *
+ *     NOT wired by this entry:
+ *       - uv_getnameinfo (reverse DNS) lives in src/unix/getnameinfo.c,
+ *         which is NOT in the WASI source list — there is no
+ *         __wasi_resolve-reverse host import yet. uv_getnameinfo
+ *         remains stubbed below.
+ *       - if_indextoname / if_nametoindex (the underlying libc
+ *         primitives, declared in <net/if.h> but unexported by wasix-
+ *         libc) — stubbed below to errno=ENOSYS so uv_if_indextoname
+ *         propagates UV_ENOSYS via UV__ERR(errno).
+ *
  *   - Process title. WASI has no argv modification ABI; title ops
  *     are tracked in the common uv-common.c layer but need the
  *     cleanup entry point.
@@ -134,6 +175,7 @@
 #include <string.h> /* memset */
 #include <signal.h>
 #include <ifaddrs.h> /* getifaddrs / freeifaddrs stubs (see block below) */
+#include <net/if.h>  /* if_indextoname / if_nametoindex stubs (see block) */
 
 /* ========================================================================
  * Process title / threadpool cleanup
@@ -269,9 +311,46 @@ int uv__pthread_sigmask(int how, const sigset_t* set, sigset_t* oset) {
  *   - firebox#582 §13.1: uv_tcp_init + uv_tcp_connect — PASS 60/60
  *   - firebox#585 §13.2: uv_tcp_bind                  — PASS 90/90
  *   - firebox#590 §13.3: uv_write + uv_read_start     — PASS 90/90
+ *   - firebox#592 §13.5: uv_getaddrinfo (DNS)         — PASS 90/90
+ *     (chained discriminator: resolve registry.npmjs.org → connect →
+ *      write → read; HTTPS-port lookup, plain-HTTP request to port 80
+ *      to keep TLS out of the loop; the resolution gate alone fires
+ *      30/30 per shell × 3 shells).
  *
- * §13.4 (uv_listen / uv_accept), §13.5 (DNS — uv_getaddrinfo, still
- * stubbed below), §13.6+ (TLS) remain ahead.
+ * §13.4 (uv_listen / uv_accept) and §13.6+ (TLS) remain ahead. §13.5
+ * (DNS) is wired via getaddrinfo.c — see the next block.
+ * ======================================================================== */
+
+
+/* ========================================================================
+ * DNS forward resolution — REAL implementations
+ *
+ * firebox#592: src/unix/getaddrinfo.c (libuv's portable threadpool-based
+ * DNS-resolver shim) is now in the WASI CMake source list. The Firebox
+ * wasix-libc sysroot exports real getaddrinfo / freeaddrinfo /
+ * gai_strerror; underneath, wasix-libc's __lookup_name routes through
+ * the `__wasi_resolve` import (wasix_32v1.resolve), implemented in the
+ * Firebox wasmer fork at lib/wasix/src/syscalls/wasix/resolve.rs as an
+ * async host-side DNS lookup.
+ *
+ * libuv's getaddrinfo.c thunks uv_getaddrinfo through
+ * uv__work_submit(UV__WORK_SLOW_IO) onto the threadpool — the worker
+ * calls getaddrinfo(3) → __lookup_name → __wasi_resolve → host
+ * resolver, then uv__getaddrinfo_done fires the user's
+ * uv_getaddrinfo_cb on the loop thread via the async self-pipe wakeup.
+ *
+ * Re-stubbing uv_getaddrinfo / uv_freeaddrinfo / uv_if_indextoname /
+ * uv_if_indextoiid / uv__getaddrinfo_translate_error here would clash
+ * with getaddrinfo.c at link.
+ *
+ * NOT wired by this block:
+ *   - uv_getnameinfo (reverse DNS) — lives in src/unix/getnameinfo.c,
+ *     which is NOT in the WASI source list. No __wasi_resolve-reverse
+ *     host import yet. uv_getnameinfo remains stubbed (see the "DNS
+ *     surface / interface_addresses" block below).
+ *   - if_indextoname / if_nametoindex (the underlying libc primitives,
+ *     declared in <net/if.h> but unexported by wasix-libc) — stubbed
+ *     below to ENOSYS so uv_if_indextoname propagates that errno.
  * ======================================================================== */
 
 
@@ -311,6 +390,41 @@ int getifaddrs(struct ifaddrs** ifap) {
 
 void freeifaddrs(struct ifaddrs* ifa) {
   (void) ifa;
+}
+
+
+/* ========================================================================
+ * if_indextoname / if_nametoindex — wasix-libc header-only (firebox#592
+ * audit)
+ *
+ * getaddrinfo.c's uv_if_indextoname calls if_indextoname to map an
+ * interface index to its kernel name (e.g. "eth0"). wasix-libc declares
+ * both prototypes in <net/if.h> but does NOT export the symbols (no .o
+ * for either in libc.a; verified via llvm-nm). Stub both to fail with
+ * errno=ENOSYS so uv_if_indextoname falls through to UV__ERR(errno),
+ * which surfaces UV_ENOSYS to the libuv user.
+ *
+ * The v1 DNS path (Node's net + dns wrappers, Edge.js's npm-install
+ * uv_getaddrinfo flow) never exercises this — it's needed only by the
+ * network-interface enumeration surface (os.networkInterfaces() in
+ * Node), which is not on the cascade-9 critical path.
+ *
+ * Replacing these with real interface enumeration is wireup work for a
+ * follow-up: the wasix-libc interface-enumeration ABI is not yet
+ * specified.
+ * ======================================================================== */
+
+char* if_indextoname(unsigned int ifindex, char* ifname) {
+  (void) ifindex; (void) ifname;
+  errno = ENOSYS;
+  return NULL;
+}
+
+
+unsigned int if_nametoindex(const char* ifname) {
+  (void) ifname;
+  errno = ENOSYS;
+  return 0;
 }
 
 
@@ -579,22 +693,12 @@ const char* uv_dlerror(const uv_lib_t* lib) {
  * pthread_getname_np.)
  */
 
-int uv_getaddrinfo(uv_loop_t* loop,
-                   uv_getaddrinfo_t* req,
-                   uv_getaddrinfo_cb getaddrinfo_cb,
-                   const char* node,
-                   const char* service,
-                   const struct addrinfo* hints) {
-  (void) loop; (void) req; (void) getaddrinfo_cb;
-  (void) node; (void) service; (void) hints;
-  return UV_ENOSYS;
-}
-
-
-void uv_freeaddrinfo(struct addrinfo* ai) {
-  (void) ai;
-}
-
+/* uv_getaddrinfo / uv_freeaddrinfo are NOT stubbed here — firebox#592
+ * pulled src/unix/getaddrinfo.c into the WASI CMake source list. See
+ * the "DNS forward resolution — REAL implementations" block above for
+ * the wire-through narrative. Re-stubbing here would clash with
+ * getaddrinfo.c at link.
+ */
 
 int uv_getnameinfo(uv_loop_t* loop,
                    uv_getnameinfo_t* req,

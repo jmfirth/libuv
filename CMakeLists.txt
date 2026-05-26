@@ -510,10 +510,47 @@ if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
   # `npm install left-pad`. With tcp.c wired the early-return no longer
   # fires; subsequent #577 sub-phases (§13.2 bind / §13.3 send / §13.4
   # listen-accept / §13.5 DNS resolver / §13.6+ TLS) compose on top.
+  #
+  # firebox#592: src/unix/getaddrinfo.c IS ALSO in this list. The Firebox
+  # wasix-libc sysroot exports real getaddrinfo / freeaddrinfo /
+  # gai_strerror / getnameinfo — verified via llvm-nm on
+  # scripts/wasix-libc/sysroot-patched-threads/lib/wasm32-wasi-threads/
+  # libc.a (each has its own .o, all `T` symbols). Underneath,
+  # wasix-libc's __lookup_name routes through the `__wasi_resolve` import
+  # (wasix_32v1.resolve), implemented in the Firebox wasmer fork at
+  # lib/wasix/src/syscalls/wasix/resolve.rs as an async host-side DNS
+  # lookup. libuv's getaddrinfo.c thunks uv_getaddrinfo through
+  # uv__work_submit(UV__WORK_SLOW_IO) onto the threadpool, where the
+  # worker calls getaddrinfo(3) → __lookup_name → __wasi_resolve → host
+  # resolver, then uv__getaddrinfo_done fires the user's
+  # uv_getaddrinfo_cb on the loop thread via async.c's self-pipe wakeup
+  # (which is why async.c had to land first at #438).
+  #
+  # getaddrinfo.c also defines uv_if_indextoname / uv_if_indextoiid,
+  # which call libc's if_indextoname. wasix-libc declares
+  # if_indextoname / if_nametoindex in <net/if.h> but does NOT export
+  # the symbols (no .o for either in libc.a; verified via llvm-nm).
+  # wasi-bootstrap.c stubs both to errno=ENOSYS so uv_if_indextoname
+  # falls through to UV__ERR(errno) cleanly. The v1 DNS path (Node's
+  # net + dns wrappers, Edge.js's npm-install uv_getaddrinfo flow)
+  # never exercises this — it's needed only by os.networkInterfaces(),
+  # which is not on the cascade-9 critical path.
+  #
+  # This unblocks cascade-9 §13.5: npm needs to resolve
+  # registry.npmjs.org before it can connect(), and Node's dns_wrap.cc
+  # calls uv_getaddrinfo. With getaddrinfo.c wired the UV_ENOSYS-on-
+  # resolve early return that previously blocked `npm install left-pad`
+  # no longer fires; the next stops are §13.4 (listen / accept — server-
+  # side TCP) and §13.6+ (TLS for the HTTPS connection to
+  # registry.npmjs.org). uv_getnameinfo (reverse DNS, src/unix/
+  # getnameinfo.c) is NOT in this list — there is no
+  # __wasi_resolve-reverse host import yet, and reverse DNS is not on
+  # the cascade-9 critical path.
   list(APPEND uv_sources
     src/unix/async.c
     src/unix/core.c
     src/unix/fs.c
+    src/unix/getaddrinfo.c
     src/unix/loop.c
     src/unix/loop-watcher.c
     src/unix/no-fsevents.c
