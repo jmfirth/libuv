@@ -448,8 +448,9 @@ endif()
 # cross-compile toolchain file.
 if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
   # Bootstrap-style subset: just enough for CMake's
-  # uv_spawn/uv_pipe/uv_read_start/uv_run/uv_timer path. No TCP, no
-  # UDP, no DNS in v1.
+  # uv_spawn/uv_pipe/uv_read_start/uv_run/uv_timer path. No UDP, no
+  # DNS resolver, no dlopen in v1. (TCP was added in firebox#582 — see
+  # the third paragraph below.)
   #
   # firebox#438: src/unix/thread.c IS in this list. The Firebox sysroot
   # (wasm32-wasi target, wasixcc-bundled musl top-half) exports the
@@ -486,6 +487,29 @@ if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
   # posix-poll watcher) — every primitive (pipe/poll/read/write) is in
   # the WASI sysroot. The uv_async_* stubs were removed from
   # wasi-bootstrap.c.
+  #
+  # firebox#582: src/unix/tcp.c IS ALSO in this list. The Firebox wasmer
+  # runtime's InodeSocket::Pollable impl drives AF_INET sockets through
+  # posix-poll.c equivalently to the AF_UNIX path that pipe.c has used
+  # since v1 — verified end-to-end by the #580 POSIX-socket spike
+  # (30/30 PASS connect → POLLOUT → SO_ERROR=0 to 1.1.1.1:80, 50-60 ms
+  # per handshake; signature incompatible with a firewall-block
+  # masquerade). tcp.c needs the BSD-sockets surface (socket, bind,
+  # connect, listen, getsockname, getpeername, setsockopt, SO_REUSEADDR,
+  # TCP_NODELAY/SO_KEEPALIVE option families, socketpair) — all of which
+  # the Firebox sysroot exports. tcp.c also references getifaddrs /
+  # freeifaddrs for the IPv6 link-local scope-id lookup; wasix-libc
+  # ships the header but no symbol export, so wasi-bootstrap.c stubs
+  # them to errno=ENOSYS / no-op (uv__ipv6_link_local_scope_id falls
+  # through to rv=0 cleanly). The uv_tcp_* / uv__tcp_* / uv_socketpair
+  # stubs were removed from wasi-bootstrap.c so there is no
+  # duplicate-symbol clash at link.
+  #
+  # This unblocks cascade-9 Mechanism C: Edge.js's TcpCtor early-returns
+  # on UV_ENOSYS from uv_tcp_init, which was the last hop blocking
+  # `npm install left-pad`. With tcp.c wired the early-return no longer
+  # fires; subsequent #577 sub-phases (§13.2 bind / §13.3 send / §13.4
+  # listen-accept / §13.5 DNS resolver / §13.6+ TLS) compose on top.
   list(APPEND uv_sources
     src/unix/async.c
     src/unix/core.c
@@ -500,6 +524,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
     src/unix/process.c
     src/unix/signal.c
     src/unix/stream.c
+    src/unix/tcp.c
     src/unix/thread.c
     src/unix/tty.c
     src/unix/wasi.c

@@ -30,6 +30,14 @@
  *
  *   - UDP (uv_udp_open / close). Out-of-scope for v1.
  *
+ *   - Polling on non-fd-non-socket handles (uv_poll_init_socket /
+ *     uv_poll_start / uv_poll_stop). Out-of-scope for v1; TCP fds
+ *     poll via posix-poll.c directly.
+ *
+ *   - DNS resolution (uv_getaddrinfo / uv_freeaddrinfo /
+ *     uv_getnameinfo). Out-of-scope for v1; will be wired in #577
+ *     §13.5 once the underlying wasix-libc DNS resolver lands.
+ *
  *   - Dynamic linking (uv_dlopen / dlerror / dlsym / dlclose). Out-of-
  *     scope for v1; our WASM binaries are statically linked.
  *
@@ -38,6 +46,14 @@
  *     signal masks handled at the WASIX layer).
  *
  *   - uv__fs_poll_close (so stat-polling fs watchers don't undef).
+ *
+ *   - getifaddrs / freeifaddrs. wasix-libc ships the ifaddrs.h header
+ *     but does NOT export the symbols (firebox#582 audit). tcp.c
+ *     references them via uv__ipv6_link_local_scope_id, but only on
+ *     the IPv6 link-local connect path. Stub getifaddrs to return -1
+ *     (errno=ENOSYS) so libuv falls through to rv=0 (scope_id
+ *     unknown) — the v1 outbound-connect path uses IPv4 1.1.1.1 / DNS
+ *     A-record addresses where the scope_id is irrelevant.
  *
  * What this file NO LONGER stubs (firebox#438):
  *
@@ -56,6 +72,22 @@
  *     fire, otherwise the threadpool completion handshake deadlocks —
  *     a no-op stub is no longer acceptable. async.c uses a self-pipe;
  *     re-stubbing uv_async_* here would clash with it at link.
+ *
+ *   - TCP (uv_tcp_init / uv_tcp_open / uv_tcp_getsockname /
+ *     uv_tcp_getpeername / uv_tcp_close_reset / uv__tcp_bind /
+ *     uv__tcp_connect / uv__tcp_listen / uv__tcp_close / uv__tcp_nodelay
+ *     / uv__tcp_keepalive / uv_tcp_nodelay / uv_tcp_keepalive /
+ *     uv_tcp_simultaneous_accepts / uv_tcp_init_ex / uv_socketpair).
+ *     firebox#582: src/unix/tcp.c (libuv's portable BSD-sockets TCP
+ *     backend) is now in the WASI CMake source list. The Firebox
+ *     wasmer runtime's InodeSocket::Pollable impl drives AF_INET
+ *     sockets through posix-poll.c equivalently to AF_UNIX sockets
+ *     (verified via #580 spike — 30/30 PASS connect→POLLOUT→SO_ERROR=0
+ *     to 1.1.1.1:80). Re-stubbing any uv_tcp_* / uv_socketpair symbol
+ *     here would clash with tcp.c at link. This is what unblocks
+ *     cascade-9 Mechanism C (Edge.js TcpCtor early-return on
+ *     UV_ENOSYS — now uv_tcp_init returns 0 and the connect path runs
+ *     through to wasmer's sock_connect).
  *
  *   - Process title. WASI has no argv modification ABI; title ops
  *     are tracked in the common uv-common.c layer but need the
@@ -77,7 +109,7 @@
 #include <stdlib.h> /* abort */
 #include <string.h> /* memset */
 #include <signal.h>
-#include <sys/socket.h> /* socketpair */
+#include <ifaddrs.h> /* getifaddrs / freeifaddrs stubs (see block below) */
 
 /* ========================================================================
  * Process title / threadpool cleanup
@@ -198,53 +230,53 @@ int uv__pthread_sigmask(int how, const sigset_t* set, sigset_t* oset) {
 
 
 /* ========================================================================
- * TCP / poll / socketpair — referenced by core.c / stream.c / process.c
+ * TCP / uv_socketpair — REAL implementations
  *
- * These are defined in tcp.c / poll.c which we deliberately exclude
- * from the WASI source set. The references are in dead code paths
- * (no TCP handles get initialized), but wasm-ld still needs
- * resolution. Stub with UV_ENOSYS.
+ * firebox#582: src/unix/tcp.c (libuv's portable BSD-sockets TCP
+ * backend) is now in the WASI CMake source list. It is the one
+ * canonical home for uv_tcp_* / uv__tcp_* / uv_socketpair. Re-stubbing
+ * any of those symbols here would produce duplicate-symbol link
+ * errors against tcp.c. See the preamble's "What this file NO LONGER
+ * stubs" section for the full list and the unblock-narrative.
  * ======================================================================== */
 
-void uv__tcp_close(uv_tcp_t* handle) {
-  (void) handle;
-}
 
-
-int uv__tcp_nodelay(int fd, int on) {
-  (void) fd;
-  (void) on;
-  return UV_ENOSYS;
-}
-
-
-int uv__tcp_keepalive(int fd, int on, unsigned int delay) {
-  (void) fd;
-  (void) on;
-  (void) delay;
-  return UV_ENOSYS;
-}
-
+/* ========================================================================
+ * poll — uv__poll_close is the only piece needed for the dead-stream-close
+ * path; full uv_poll_* surface still stubbed (see public-stubs block
+ * below).
+ * ======================================================================== */
 
 void uv__poll_close(uv_poll_t* handle) {
   (void) handle;
 }
 
 
-/* uv_socketpair wraps socketpair(2). wasix-libc has socketpair; this
- * real implementation is useful because libuv's uv_pipe(fds, flags)
- * on some platforms delegates to uv_socketpair for SOCK_STREAM pipes.
- * For WASI v1 we gate it behind a trivial wrapper that forwards.
- */
-int uv_socketpair(int type, int protocol, uv_os_sock_t fds[2], int flags0, int flags1) {
-  int sv[2];
-  (void) flags0;
-  (void) flags1;
-  if (socketpair(AF_UNIX, type, protocol, sv) != 0)
-    return UV__ERR(errno);
-  fds[0] = sv[0];
-  fds[1] = sv[1];
-  return 0;
+/* ========================================================================
+ * getifaddrs / freeifaddrs — wasix-libc header-only (firebox#582 audit)
+ *
+ * tcp.c's uv__ipv6_link_local_scope_id calls getifaddrs to find the
+ * interface scope_id for IPv6 link-local destinations (fe80::/10). The
+ * v1 connect path uses IPv4 and DNS-resolved global IPv6, so the
+ * function is invoked only on an unusual code path; stubbing
+ * getifaddrs to errno=ENOSYS makes uv__ipv6_link_local_scope_id fall
+ * through to rv=0 (scope_id unknown — acceptable since the kernel
+ * will look up the default route). freeifaddrs is a no-op on NULL.
+ *
+ * Replacing these with real ifaddrs traversal is wireup work for a
+ * follow-up: the wasix-libc IFADDR enumeration ABI is not yet
+ * specified.
+ * ======================================================================== */
+
+int getifaddrs(struct ifaddrs** ifap) {
+  if (ifap != NULL) *ifap = NULL;
+  errno = ENOSYS;
+  return -1;
+}
+
+
+void freeifaddrs(struct ifaddrs* ifa) {
+  (void) ifa;
 }
 
 
@@ -267,19 +299,23 @@ ssize_t uv__fs_copy_file_range(int fd_in, off_t* off_in,
 
 
 /* ========================================================================
- * Public uv_tcp_/uv_udp_/uv_poll_ surface
+ * Public uv_udp_/uv_poll_ surface
  *
  * Edge.js (`wasmerio/edgejs`, firebox#366 Mechanism α) compiles a wider
- * surface than our v1 CMake-bootstrap scope: edge_tcp_wrap.cc / node's
- * tcp_wrap.cc reference the FULL public `uv_tcp_*` API; Node's
- * dns_wrap.cc references `uv_getaddrinfo` / `uv_getnameinfo`; the
- * UDP wrap references `uv_udp_*` set-methods; threadpool worker code
- * references `uv_sem_*`; the dynamic-loader binding references
- * `uv_dl*`. Our CMake source list deliberately omits tcp.c / udp.c /
- * poll.c / dl.c / getaddrinfo.c — all of which expand to dead paths
- * since wasm32-wasi has no real socket-handle/posix-poll/dlopen
+ * surface than our v1 CMake-bootstrap scope: Node's dns_wrap.cc
+ * references `uv_getaddrinfo` / `uv_getnameinfo`; the UDP wrap
+ * references `uv_udp_*` set-methods; the dynamic-loader binding
+ * references `uv_dl*`. Our CMake source list deliberately omits
+ * udp.c / poll.c / dl.c / getaddrinfo.c — all of which expand to dead
+ * paths since wasm32-wasi has no real datagram-socket/dlopen
  * primitives behind them. But the symbol references in Edge.js's
  * static-link still need resolution.
+ *
+ * (Note: tcp.c is now IN the WASI source list as of firebox#582 — see
+ * the preamble and the "TCP / uv_socketpair — REAL implementations"
+ * note above. The corresponding uv_tcp_* stubs that used to live here
+ * have been removed; tcp.c is the one canonical home for that symbol
+ * surface now.)
  *
  * All stubs return UV_ENOSYS and set errno. JS callers see the
  * standard "ENOSYS"/"not implemented" error path Node already has for
@@ -287,86 +323,6 @@ ssize_t uv__fs_copy_file_range(int fd_in, off_t* off_in,
  * are in src/unix/wasi.c (real per-platform-utility location); these
  * are the cross-link stubs only.
  * ======================================================================== */
-
-/* -- uv_tcp_* (public) -- */
-
-int uv_tcp_init(uv_loop_t* loop, uv_tcp_t* handle) {
-  (void) loop; (void) handle;
-  return UV_ENOSYS;
-}
-
-
-int uv_tcp_open(uv_tcp_t* handle, uv_os_sock_t sock) {
-  (void) handle; (void) sock;
-  return UV_ENOSYS;
-}
-
-
-int uv_tcp_getsockname(const uv_tcp_t* handle,
-                       struct sockaddr* name,
-                       int* namelen) {
-  (void) handle; (void) name; (void) namelen;
-  return UV_ENOSYS;
-}
-
-
-int uv_tcp_getpeername(const uv_tcp_t* handle,
-                       struct sockaddr* name,
-                       int* namelen) {
-  (void) handle; (void) name; (void) namelen;
-  return UV_ENOSYS;
-}
-
-
-int uv_tcp_close_reset(uv_tcp_t* handle, uv_close_cb close_cb) {
-  (void) handle; (void) close_cb;
-  return UV_ENOSYS;
-}
-
-
-/* uv__tcp_bind / uv__tcp_connect — internal helpers, referenced by
- * uv_tcp_bind / uv_tcp_connect wrappers. Match upstream signatures.
- */
-int uv__tcp_bind(uv_tcp_t* tcp,
-                 const struct sockaddr* addr,
-                 unsigned int addrlen,
-                 unsigned int flags) {
-  (void) tcp; (void) addr; (void) addrlen; (void) flags;
-  return UV_ENOSYS;
-}
-
-
-int uv__tcp_connect(uv_connect_t* req,
-                    uv_tcp_t* handle,
-                    const struct sockaddr* addr,
-                    unsigned int addrlen,
-                    uv_connect_cb cb) {
-  (void) req; (void) handle; (void) addr; (void) addrlen; (void) cb;
-  return UV_ENOSYS;
-}
-
-
-int uv__tcp_listen(uv_tcp_t* tcp, int backlog, uv_connection_cb cb) {
-  (void) tcp; (void) backlog; (void) cb;
-  return UV_ENOSYS;
-}
-
-
-/* PUBLIC uv_tcp_nodelay / uv_tcp_keepalive variants (take uv_tcp_t*,
- * not fd). The earlier uv__tcp_nodelay / uv__tcp_keepalive are the
- * fd-taking internal variants. Both are referenced by tcp_wrap.cc.
- */
-int uv_tcp_nodelay(uv_tcp_t* handle, int enable) {
-  (void) handle; (void) enable;
-  return UV_ENOSYS;
-}
-
-
-int uv_tcp_keepalive(uv_tcp_t* handle, int enable, unsigned int delay) {
-  (void) handle; (void) enable; (void) delay;
-  return UV_ENOSYS;
-}
-
 
 /* -- uv_udp_* (public + a few internal helpers) -- */
 
