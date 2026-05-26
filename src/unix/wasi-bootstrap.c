@@ -88,6 +88,30 @@
  *     cascade-9 Mechanism C (Edge.js TcpCtor early-return on
  *     UV_ENOSYS — now uv_tcp_init returns 0 and the connect path runs
  *     through to wasmer's sock_connect).
+ *     - firebox#585 §13.2 discriminator: uv_tcp_bind PASS 90/90
+ *       (clean wire-through to wasix-libc bind(2); no fork delta).
+ *     - firebox#590 §13.3 discriminator: uv_write / uv_read_start
+ *       PASS 90/90 against 1.1.1.1:80 with HTTP/1.x response received
+ *       (clean wire-through to wasix-libc write(2)/writev(2)/read(2);
+ *       no fork delta). stream.c's uv__try_write → uv__writev path
+ *       resolves: n==1 → write(2); n>1 → writev(2). The sendmsg-based
+ *       SCM_RIGHTS fd-passing branch is already #if !__wasi__ gated
+ *       upstream so it's compiled out.
+ *
+ *   - Stream I/O (uv_write / uv_write2 / uv_read_start / uv_read_stop /
+ *     uv__write / uv__try_write / uv__writev / uv_try_write /
+ *     uv_try_write2 / uv_listen / uv_accept / uv__handle_fd /
+ *     uv__io_feed and the rest of the portable stream surface).
+ *     src/unix/stream.c was pulled into the WASI CMake source list as
+ *     a transitive dep of tcp.c at #582 (uv_tcp_init → uv__stream_init
+ *     lives in stream.c). firebox#590 closes the write+read
+ *     discriminator side. On WASI the sendmsg branch in uv__try_write
+ *     is #if !__wasi__ gated upstream; the unconditional path is
+ *     uv__writev → write(2) (n==1) or writev(2) (n>1), both real
+ *     exports in the Firebox wasix-libc sysroot. Re-stubbing any
+ *     uv_write_* / uv__write_* / uv_read_* / uv_listen / uv_accept
+ *     symbol here would clash with stream.c at link. listen/accept
+ *     are linked but unexercised until §13.4 wires the inbound side.
  *
  *   - Process title. WASI has no argv modification ABI; title ops
  *     are tracked in the common uv-common.c layer but need the
@@ -230,14 +254,24 @@ int uv__pthread_sigmask(int how, const sigset_t* set, sigset_t* oset) {
 
 
 /* ========================================================================
- * TCP / uv_socketpair — REAL implementations
+ * TCP / uv_socketpair / stream I/O — REAL implementations
  *
  * firebox#582: src/unix/tcp.c (libuv's portable BSD-sockets TCP
- * backend) is now in the WASI CMake source list. It is the one
- * canonical home for uv_tcp_* / uv__tcp_* / uv_socketpair. Re-stubbing
- * any of those symbols here would produce duplicate-symbol link
- * errors against tcp.c. See the preamble's "What this file NO LONGER
- * stubs" section for the full list and the unblock-narrative.
+ * backend) is now in the WASI CMake source list, with src/unix/stream.c
+ * pulled in as a transitive dep (uv_tcp_init → uv__stream_init).
+ * tcp.c is the one canonical home for uv_tcp_* / uv__tcp_* /
+ * uv_socketpair; stream.c is the one canonical home for uv_write /
+ * uv_write2 / uv_read_start / uv_read_stop / uv__try_write / uv_listen /
+ * uv_accept. Re-stubbing any of those symbols here would produce
+ * duplicate-symbol link errors.
+ *
+ * Discriminator coverage (all "clean wire-through, no fork delta"):
+ *   - firebox#582 §13.1: uv_tcp_init + uv_tcp_connect — PASS 60/60
+ *   - firebox#585 §13.2: uv_tcp_bind                  — PASS 90/90
+ *   - firebox#590 §13.3: uv_write + uv_read_start     — PASS 90/90
+ *
+ * §13.4 (uv_listen / uv_accept), §13.5 (DNS — uv_getaddrinfo, still
+ * stubbed below), §13.6+ (TLS) remain ahead.
  * ======================================================================== */
 
 
