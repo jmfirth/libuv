@@ -109,6 +109,37 @@
  *       resolves: n==1 → write(2); n>1 → writev(2). The sendmsg-based
  *       SCM_RIGHTS fd-passing branch is already #if !__wasi__ gated
  *       upstream so it's compiled out.
+ *     - firebox#594 §13.6 discriminator: TLS handshake (https.get to
+ *       registry.npmjs.org:443) PASS 90/90 (30 iter × 3 shells) against
+ *       Edge.js's bundled Node BoringSSL/OpenSSL. Spec §4.6's
+ *       `[predicted]` zero-work claim CONFIRMED end-to-end: Node's TLS
+ *       layer reads/writes through the same uv_tcp_t stream interface
+ *       wired by §13.1-§13.3 with NO additional binding work. This is
+ *       a metadata-only entry — no fork delta in this file or anywhere
+ *       else in libuv; the TLS code is in Node's source tree, compiles
+ *       into the Edge.js binary, and rides on the already-shipped TCP
+ *       + stream wireup. Disclaimers: validated against
+ *       `registry.npmjs.org:443` specifically (TLS 1.2/1.3 mainline,
+ *       CA-trusted endpoint); other endpoints / mTLS / SNI edge cases
+ *       not exercised by the discriminator (deferred to §G6 integration
+ *       canaries). `https.get` simplest path exercised; `https.request`
+ *       with bodies, keep-alive pooling, ALPN exercised in §G6, not
+ *       here. IPv6 fallback acceptable (the discriminator routinely
+ *       resolves AAAA records first per #592 §13.5).
+ *     - firebox#594 §G6 (`npm install left-pad`) STRETCH: TLS body
+ *       received byte-perfectly (sha256 of compressed .tgz matches
+ *       upstream npmjs sha), zlib gunzipSync of the buffered body
+ *       produces correct decompressed bytes. HOWEVER the streaming-
+ *       pipe path (`res.pipe(zlib.createGunzip())` as used by npm's
+ *       tar extractor) produces 17920 decompressed bytes with
+ *       *non-deterministic sha mismatch* — different runs produce
+ *       different wrong-byte streams while buffered+sync is reliably
+ *       correct. The wedge is in stream chunk ORDERING (libuv stream
+ *       chunk callback delivery), NOT in TLS itself. §13.6 closure is
+ *       NOT contingent on §G6 — TLS handshake + body integrity are
+ *       proven. §G6 surfaces a follow-up data-corruption class in
+ *       libuv's stream chunk callback path (sibling to cascade-9 Mech
+ *       B silent-data-corruption pattern; see firebox#600).
  *
  *   - Stream I/O (uv_write / uv_write2 / uv_read_start / uv_read_stop /
  *     uv__write / uv__try_write / uv__writev / uv_try_write /
