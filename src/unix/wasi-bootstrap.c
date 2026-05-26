@@ -132,14 +132,26 @@
  *       produces correct decompressed bytes. HOWEVER the streaming-
  *       pipe path (`res.pipe(zlib.createGunzip())` as used by npm's
  *       tar extractor) produces 17920 decompressed bytes with
- *       *non-deterministic sha mismatch* — different runs produce
- *       different wrong-byte streams while buffered+sync is reliably
- *       correct. The wedge is in stream chunk ORDERING (libuv stream
- *       chunk callback delivery), NOT in TLS itself. §13.6 closure is
- *       NOT contingent on §G6 — TLS handshake + body integrity are
- *       proven. §G6 surfaces a follow-up data-corruption class in
- *       libuv's stream chunk callback path (sibling to cascade-9 Mech
- *       B silent-data-corruption pattern; see firebox#600).
+ *       sha mismatch. firebox#600 investigation FALSIFIES the libuv-
+ *       stream-chunk-ordering hypothesis: chunks delivered to
+ *       `res.on('data')` are byte-correct (chunk-anatomy probe
+ *       confirms zero buffer drift; `Buffer.concat` of liveRefs matches
+ *       host curl sha for the COMPRESSED body). The wedge is NOT in
+ *       libuv stream.c, NOT in wasmer sock_recv. It is in Node.js
+ *       zlib's STREAMING Transform path (`createGunzip` /
+ *       `createUnzip` / `createInflate` / `_processChunk`): when the
+ *       Transform receives MULTIPLE writes, the inflate state is
+ *       corrupted across `_processChunk` calls, producing deterministic
+ *       (per-cut-point) wrong output. Single-write (`gz.end(buf)`,
+ *       `gz.write(buf); gz.end()` with one Buffer) produces correct
+ *       output. The 44-byte gzip cut-point sweep confirms 35/43 cut
+ *       points produce DIFFERENT wrong shas while k≥36 (second write
+ *       is gzip trailer only, inflate already hit Z_STREAM_END on
+ *       first call) is correct. §13.6 closure is NOT contingent on
+ *       §G6 — TLS handshake + body integrity are proven. The follow-
+ *       up lives in Edge.js's bundled Node `src/node_zlib.cc`
+ *       inflate-state continuation across `req.write()` calls, NOT in
+ *       libuv. See firebox#600 results for the falsification trail.
  *
  *   - Stream I/O (uv_write / uv_write2 / uv_read_start / uv_read_stop /
  *     uv__write / uv__try_write / uv__writev / uv_try_write /
