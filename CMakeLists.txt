@@ -237,10 +237,16 @@ else()
   endif()
   # Source set used by most unix targets. The WASI branch below uses a
   # reduced subset (the CMake-bootstrap-style scope) because several of
-  # these files pull in APIs WASI/WASIX either doesn't have at all (dl,
-  # getaddrinfo in a thread, udp) or that v1 deliberately stubs out
+  # these files pull in APIs WASI/WASIX either doesn't have at all
+  # (getaddrinfo in a thread, udp) or that v1 deliberately stubs out
   # (async, thread, tcp). See src/unix/wasi-bootstrap.c for stub
   # rationale and .claude/plans/libuv-wasix-port.md for the full scope.
+  # firebox#759: uv_dl* (dlopen/dlsym/dlclose/dlerror) is now REAL on the
+  # WASIX backend — wasi-bootstrap.c carries upstream src/unix/dl.c's body
+  # (lowered onto wasix-libc's <dlfcn.h> → the WASIX `dlopen` syscall), so
+  # native `.node` addons load against a `dylink.0` PIC dynamic-main. dl.c
+  # itself stays out of the WASI list because the symbols live in
+  # wasi-bootstrap.c (where the historical UV_ENOSYS stubs were).
   if(NOT CMAKE_SYSTEM_NAME STREQUAL "WASI")
     list(APPEND uv_sources
          src/unix/async.c

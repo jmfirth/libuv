@@ -40,8 +40,13 @@
  *     uv_getaddrinfo + getaddrinfo.c — see "What this file NO LONGER
  *     stubs" block below.)
  *
- *   - Dynamic linking (uv_dlopen / dlerror / dlsym / dlclose). Out-of-
- *     scope for v1; our WASM binaries are statically linked.
+ *   - Dynamic linking (uv_dlopen / dlerror / dlsym / dlclose). firebox#759
+ *     re-points these onto wasix-libc's dlopen/dlsym (<dlfcn.h>), which
+ *     lower to the WASIX `dlopen` syscall and instantiate a PIC wasm
+ *     side-module against a `dylink.0` PIC dynamic-main (the QuickJS edge
+ *     built that way). Real for a dynamic-main; on a static main the
+ *     syscall yields NULL → a normal dlerror() string. See the uv_dl*
+ *     block below.
  *
  *   - pthread_atfork / pthread_sigmask. Firebox-specific helper symbols
  *     supplied as trivial no-ops (no fork-time pthread re-init hook;
@@ -682,34 +687,79 @@ int uv_poll_stop(uv_poll_t* handle) {
  * stubbed here — that would clash with thread.c. -- */
 
 
-/* -- uv_dl* (dynamic loader; static-linked WASM has no dlopen) -- */
+/* -- uv_dl* (dynamic loader) — firebox#759 -----------------------------
+ *
+ * Re-pointed from the historical UV_ENOSYS stubs onto wasix-libc's
+ * dlopen/dlsym/dlclose/dlerror (<dlfcn.h>), which lower to the WASIX
+ * `dlopen` syscall (__wasi_dlopen / __wasi_dlsym -> the host
+ * `__imported_wasix_32v1_dlopen` import). That syscall instantiates a PIC
+ * wasm side-module against the dynamically-linked main via the WASIX
+ * dynamic linker. It only works when the MAIN module is a `dylink.0` PIC
+ * dynamic-main (firebox#759 builds the QuickJS edge that way); on a static
+ * main the syscall returns "not a dynamically-linked instance" and dlopen
+ * yields NULL, which is surfaced as a normal dlerror() string -- the same
+ * shape real Node gives a failed `require('./foo.node')`.
+ *
+ * This is the body of upstream libuv's src/unix/dl.c, restored for the
+ * WASI/WASIX backend now that dlopen is real. It is what makes
+ * `process.dlopen` -> uv_dlopen -> uv_dlsym("napi_register_module_v1")
+ * reach a loaded native addon (the _ssl.so / python3.wasm pattern applied
+ * to N-API addons). See work/tasks/759-...  */
+
+#include <dlfcn.h>
+
+static int uv__dlerror(uv_lib_t* lib);
 
 int uv_dlopen(const char* filename, uv_lib_t* lib) {
-  (void) filename;
-  if (lib != NULL) {
-    /* Match upstream pattern: zero out the handle. uv_lib_t has
-     * `handle` (void*) and `errmsg` (char*); both POD. */
-    memset(lib, 0, sizeof(*lib));
-  }
-  return UV_ENOSYS;
+  dlerror(); /* Reset error status. */
+  lib->errmsg = NULL;
+  lib->handle = dlopen(filename, RTLD_LAZY);
+  return lib->handle ? 0 : uv__dlerror(lib);
 }
 
 
 void uv_dlclose(uv_lib_t* lib) {
-  (void) lib;
+  if (lib->errmsg) {
+    uv__free(lib->errmsg);
+    lib->errmsg = NULL;
+  }
+
+  if (lib->handle) {
+    /* Ignore errors. No good way to signal them without leaking memory. */
+    dlclose(lib->handle);
+    lib->handle = NULL;
+  }
 }
 
 
 int uv_dlsym(uv_lib_t* lib, const char* name, void** ptr) {
-  (void) lib; (void) name;
-  if (ptr != NULL) *ptr = NULL;
-  return UV_ENOSYS;
+  dlerror(); /* Reset error status. */
+  *ptr = dlsym(lib->handle, name);
+  return uv__dlerror(lib);
 }
 
 
 const char* uv_dlerror(const uv_lib_t* lib) {
-  (void) lib;
-  return "uv_dlopen not supported on WASI";
+  return lib->errmsg ? lib->errmsg : "no error";
+}
+
+
+static int uv__dlerror(uv_lib_t* lib) {
+  const char* errmsg;
+
+  if (lib->errmsg)
+    uv__free(lib->errmsg);
+
+  errmsg = dlerror();
+
+  if (errmsg) {
+    lib->errmsg = uv__strdup(errmsg);
+    return -1;
+  }
+  else {
+    lib->errmsg = NULL;
+    return 0;
+  }
 }
 
 
