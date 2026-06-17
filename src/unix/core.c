@@ -189,7 +189,33 @@ void uv_close(uv_handle_t* handle, uv_close_cb close_cb) {
     return;
   }
 
-  assert(!uv__is_closing(handle));
+  /* firebox#808 teardown double-free fix (cb-preserve companion).
+   *
+   * Upstream relies SOLELY on `assert(!uv__is_closing(handle))` to forbid a
+   * second uv_close on the same handle. Edge.js is built Release / -DNDEBUG, so
+   * that assert is compiled out and a re-close silently proceeds: it re-sets the
+   * CLOSING flag, re-runs the type's close (e.g. uv__process_close), and calls
+   * uv__make_close_pending() AGAIN — re-inserting the SAME handle onto
+   * loop->closing_handles. uv__run_closing_handles then drives uv__finish_close
+   * on that handle a SECOND time → close_cb (for a uv_process_t: OnProcessClose,
+   * which decrefs a JS object to zero) frees a SECOND time. The faithful firebox
+   * dlmalloc traps the 2nd free as the 0xffffffff OOB; glibc tolerates it as
+   * silent freelist corruption (invisible on Linux/node, fatal here).
+   *
+   * A blanket `if (uv__is_closing) return;` would DROP a second caller's close_cb:
+   * if a NULL-cb close landed first (handle CLOSING, cb=NULL) and a real
+   * OnProcessClose close landed second, the JS-side onexit/onclose would never
+   * fire and a waiting drain loop would spin to its guard (the observed exit-79).
+   * The faithful resolution: keep the type-close/re-enqueue idempotent (run once)
+   * while UPGRADING a NULL queued cb to a real one a later caller supplies, so the
+   * single pending finish still delivers OnProcessClose exactly once. A real cb is
+   * NEVER overwritten (that would itself double-deliver). */
+  if (uv__is_closing(handle)) {
+    if (handle->close_cb == NULL && close_cb != NULL) {
+      handle->close_cb = close_cb;   /* let the one pending finish deliver it */
+    }
+    return;
+  }
 
   handle->flags |= UV_HANDLE_CLOSING;
   handle->close_cb = close_cb;
@@ -343,6 +369,24 @@ static void uv__finish_close(uv_handle_t* handle) {
    * by uv_close(). The handle is considered active at this point because the
    * completion of the shutdown req is still pending.
    */
+  /* firebox#808 — uv__finish_close is idempotent for an already-FINISHED handle.
+   * Upstream's invariant is that a handle is finished exactly once (the assert
+   * below). In the Release/-DNDEBUG edge build that assert is compiled out, so a
+   * handle that reappears on loop->closing_handles is finished AGAIN — re-running
+   * uv__handle_unref / uv__queue_remove and, fatally, close_cb a second time. The
+   * cb-preserve guard above keeps a re-close from RE-ENQUEUEing, but a teardown
+   * drain that re-walks the loop (CloseEnvLoopHandles + repeated uv_run) can still
+   * present the same handle to uv__finish_close more than once across drain passes;
+   * without this guard the drain re-finishes (and the worker RunCleanup 256-guard /
+   * DrainAndCloseEnvLoop while(uv_run!=0) loop can fail to settle → the observed
+   * teardown spin). If the CLOSED flag is set the first finish already ran the
+   * type-close, unref, queue-remove and close_cb exactly once — the second finish
+   * must be a complete no-op. close_cb is delivered EXACTLY ONCE (by the first
+   * finish), so this does NOT reintroduce the exit-79 cb-drop. Companion to the
+   * cb-preserve guard in uv_close above. */
+  if (handle->flags & UV_HANDLE_CLOSED) {
+    return;
+  }
   assert(handle->flags & UV_HANDLE_CLOSING);
   assert(!(handle->flags & UV_HANDLE_CLOSED));
   handle->flags |= UV_HANDLE_CLOSED;
