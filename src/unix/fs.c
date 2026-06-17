@@ -238,7 +238,16 @@ static ssize_t uv__fs_futime(uv_fs_t* req) {
 #if defined(__linux__)                                                        \
     || defined(_AIX71)                                                        \
     || defined(__HAIKU__)                                                     \
-    || defined(__GNU__)
+    || defined(__GNU__)                                                       \
+    || defined(__wasi__)
+  /* firebox#NV2: the WASI toolchain defines __wasi__ (not __linux__), so
+   * this trio fell through to the `#else errno = ENOSYS` arm even though
+   * wasix-libc provides a real `futimens` that routes through
+   * __wasi_fd_filestat_set_times to the host. Adding __wasi__ to the gate
+   * (the same `|| defined(__wasi__)` pattern this file already uses for
+   * statvfs/statfs/f_type) wires Node `fs.futimes` to the real host
+   * syscall like Linux. Proven faithful: a non-libuv C futimens built with
+   * wasixcc runs rc=0, host fd_filestat_set_times fires Success. */
   struct timespec ts[2];
   ts[0] = uv__fs_to_timespec(req->atime);
   ts[1] = uv__fs_to_timespec(req->mtime);
@@ -1151,7 +1160,14 @@ static ssize_t uv__fs_utime(uv_fs_t* req) {
 #if defined(__linux__)                                                         \
     || defined(_AIX71)                                                         \
     || defined(__sun)                                                          \
-    || defined(__HAIKU__)
+    || defined(__HAIKU__)                                                      \
+    || defined(__wasi__)
+  /* firebox#NV2: see uv__fs_futime above. wasix-libc's `utimensat`
+   * (AT_FDCWD path form) routes through __wasi_path_filestat_set_times to
+   * the host; without __wasi__ in the gate Node `fs.utimes` returned
+   * ENOSYS guest-side, which libnpmexec with-lock.js touchLock treats as a
+   * compromised lock -> ECOMPROMISED, breaking `npx <remote-pkg>`
+   * (#M7P form 2). Host path_filestat_set_times is correct as of #MTW. */
   struct timespec ts[2];
   ts[0] = uv__fs_to_timespec(req->atime);
   ts[1] = uv__fs_to_timespec(req->mtime);
@@ -1192,7 +1208,11 @@ static ssize_t uv__fs_lutime(uv_fs_t* req) {
     defined(__sun)                ||                                           \
     defined(__HAIKU__)            ||                                           \
     defined(__GNU__)              ||                                           \
-    defined(__OpenBSD__)
+    defined(__OpenBSD__)          ||                                           \
+    defined(__wasi__)
+  /* firebox#NV2: see uv__fs_futime above. AT_SYMLINK_NOFOLLOW lutime via
+   * the same wasix-libc utimensat host path. Completes the utime trio so
+   * Node fs.lutimes matches Linux. */
   struct timespec ts[2];
   ts[0] = uv__fs_to_timespec(req->atime);
   ts[1] = uv__fs_to_timespec(req->mtime);
