@@ -54,13 +54,9 @@
  *
  *   - uv__fs_poll_close (so stat-polling fs watchers don't undef).
  *
- *   - getifaddrs / freeifaddrs. wasix-libc ships the ifaddrs.h header
- *     but does NOT export the symbols (firebox#582 audit). tcp.c
- *     references them via uv__ipv6_link_local_scope_id, but only on
- *     the IPv6 link-local connect path. Stub getifaddrs to return -1
- *     (errno=ENOSYS) so libuv falls through to rv=0 (scope_id
- *     unknown) — the v1 outbound-connect path uses IPv4 1.1.1.1 / DNS
- *     A-record addresses where the scope_id is irrelevant.
+ *   - getifaddrs / freeifaddrs are NOT stubbed here any more: wasix-libc
+ *     defines both since firebox#YZN (67b8cbd9), and a second definition
+ *     is a duplicate-symbol link error against libc.a. See the note below.
  *
  *   - if_indextoname / if_nametoindex. wasix-libc ships the <net/if.h>
  *     header declarations but does NOT export the symbols (firebox#592
@@ -210,7 +206,6 @@
 #include <stdlib.h> /* abort */
 #include <string.h> /* memset */
 #include <signal.h>
-#include <ifaddrs.h> /* getifaddrs / freeifaddrs stubs (see block below) */
 #include <net/if.h>  /* if_indextoname / if_nametoindex stubs (see block) */
 
 /* ========================================================================
@@ -402,31 +397,17 @@ void uv__poll_close(uv_poll_t* handle) {
 
 
 /* ========================================================================
- * getifaddrs / freeifaddrs — wasix-libc header-only (firebox#582 audit)
+ * getifaddrs / freeifaddrs — provided by wasix-libc (firebox#YZN)
  *
- * tcp.c's uv__ipv6_link_local_scope_id calls getifaddrs to find the
- * interface scope_id for IPv6 link-local destinations (fe80::/10). The
- * v1 connect path uses IPv4 and DNS-resolved global IPv6, so the
- * function is invoked only on an unusual code path; stubbing
- * getifaddrs to errno=ENOSYS makes uv__ipv6_link_local_scope_id fall
- * through to rv=0 (scope_id unknown — acceptable since the kernel
- * will look up the default route). freeifaddrs is a no-op on NULL.
- *
- * Replacing these with real ifaddrs traversal is wireup work for a
- * follow-up: the wasix-libc IFADDR enumeration ABI is not yet
- * specified.
+ * This file used to stub both (firebox#582: the header existed, the symbols
+ * did not). wasix-libc 67b8cbd9 defines them, failing honestly (-1,
+ * errno=ENOTSUP) where the host has no interface list, so
+ * uv__ipv6_link_local_scope_id still falls through to rv=0 exactly as it did
+ * on the stub's ENOSYS. The stub is removed rather than kept because a
+ * second strong definition is a duplicate-symbol link error against libc.a,
+ * and a libuv that shadowed libc would keep answering ENOSYS after the host
+ * gains a real interface list.
  * ======================================================================== */
-
-int getifaddrs(struct ifaddrs** ifap) {
-  if (ifap != NULL) *ifap = NULL;
-  errno = ENOSYS;
-  return -1;
-}
-
-
-void freeifaddrs(struct ifaddrs* ifa) {
-  (void) ifa;
-}
 
 
 /* ========================================================================
