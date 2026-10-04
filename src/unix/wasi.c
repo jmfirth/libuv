@@ -53,17 +53,43 @@
 #include <netpacket/packet.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/sysinfo.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-/* WASI does not expose a traditional notion of load average. Zero it
- * like Haiku does.
+/* Load average (firebox#46C), linux.c's uv_loadavg: /proc/loadavg first, then
+ * sysinfo(2)'s fixed-point loads (/65536).
+ *
+ * MEASURED 2026-10-04 in-guest on `--net`: sysinfo() returns the host's real
+ * loads (16.37 14.66 23.10 against the host's own `uptime`) on the current pin
+ * AND on the E65 runtime, and the E65 runtime also serves /proc/loadavg
+ * (16.37 14.65 23.10); the current pin serves no /proc/loadavg. So the
+ * sysinfo branch carries the current pin and the file carries E65.
+ *
+ * uv_loadavg has no error return. When BOTH sources fail (the browser profile:
+ * /proc/loadavg absent by ruling, sysinfo() ENOSYS) linux.c returns without
+ * touching avg[], and so does this: the caller's values stand. That is not an
+ * invented figure on libuv's side -- Node's os.loadavg() hands in a
+ * zero-initialised array, so a source-less host reads [0, 0, 0], which is what
+ * Linux libuv yields on the same failure. It used to write zeros
+ * unconditionally, which also hid the two real sources above.
  */
 void uv_loadavg(double avg[3]) {
-  avg[0] = 0;
-  avg[1] = 0;
-  avg[2] = 0;
+  struct sysinfo info;
+  char buf[128];  /* Large enough to hold all of /proc/loadavg. */
+
+  if (0 == uv__slurp("/proc/loadavg", buf, sizeof(buf)))
+    if (3 == sscanf(buf, "%lf %lf %lf", &avg[0], &avg[1], &avg[2]))
+      return;
+
+  if (sysinfo(&info) < 0)
+    return;
+
+  avg[0] = (double) info.loads[0] / 65536.0;
+  avg[1] = (double) info.loads[1] / 65536.0;
+  avg[2] = (double) info.loads[2] / 65536.0;
 }
 
 
@@ -124,19 +150,59 @@ uint64_t uv_get_available_memory(void) {
 }
 
 
-/* Resident set size (firebox#469). A wasm instance has no kernel-tracked
- * working set and the runtime serves no /proc/self/statm, so there is no
- * measured RSS to report -- and "0, success" was a false answer (callers read
- * it as "this process uses no memory"). What IS known exactly is the size of
- * the instance's linear memory: every byte the guest can touch lives in it, so
- * it is the honest UPPER BOUND on resident memory (pages the guest never
- * touched may or may not be resident on the host, but none outside it can be
- * the guest's). memory.size counts 64 KiB wasm pages and is an i64 under
- * wasm64, hence the size_t-wide builtin and the 64-bit multiply.
+/* Resident set size (firebox#469), linux.c's uv_resident_set_memory: field 24
+ * of /proc/self/stat (the rss field, in pages) times the page size.
+ *
+ * The E65 runtime serves /proc/self/stat and /proc/self/statm with the
+ * resident size the HOST measured, and when nothing could measure it (the
+ * browser, a host without a per-process counter) it fills the resident field
+ * with the linear-memory size, which is the upper bound -- so reading the file
+ * gives the right answer in both cases with no special-casing here. MEASURED
+ * 2026-10-04 on the E65 binary: stat rss 4868 pages (19.9 MB) against a
+ * 39.8 MB linear memory.
+ *
+ * Where the file cannot be read or parsed (the current pin serves no
+ * /proc/self/stat) linux.c returns the error, which would make
+ * process.memoryUsage() throw. Here the fallback is the instance's
+ * linear-memory size, memory.size * 64 KiB: every byte the guest can touch
+ * lives in it, so it is the exact UPPER BOUND on resident memory, and the
+ * honest answer when nothing measured it (it was 0 + success before #469). It
+ * is an i64 under wasm64, hence the size_t-wide builtin and the 64-bit
+ * multiply.
+ *
+ * Cost: the E65 reviewer measured ~30 ms per resident GiB per read of a
+ * /proc/self file. Not a hot path: the only callers in edgejs are
+ * process.memoryUsage(), process.memoryUsage.rss(), process.resourceUsage()
+ * and the diagnostic report (all user-invoked); `get_rss()` in edge_process.cc
+ * has no caller.
  */
 int uv_resident_set_memory(size_t* rss) {
+  char buf[1024];
+  const char* s;
+  long val;
+  long pagesize;
+  int i;
+
   if (rss == NULL)
     return UV_EINVAL;
+
+  pagesize = sysconf(_SC_PAGESIZE);
+  if (pagesize > 0 && 0 == uv__slurp("/proc/self/stat", buf, sizeof(buf))) {
+    /* The comm field may contain spaces and ')': take the last ')', then
+     * skip 22 fields, exactly as linux.c does. */
+    s = strrchr(buf, ')');
+    for (i = 1; s != NULL && i <= 22; i++)
+      s = strchr(s + 1, ' ');
+    if (s != NULL) {
+      errno = 0;
+      val = strtol(s, NULL, 10);
+      if (val >= 0 && errno == 0) {
+        *rss = (size_t) val * (size_t) pagesize;
+        return 0;
+      }
+    }
+  }
+
   *rss = (size_t) ((uint64_t) __builtin_wasm_memory_size(0) * 65536u);
   return 0;
 }
@@ -147,8 +213,12 @@ int uv_resident_set_memory(size_t* rss) {
  * 2026-10-04 on Darwin: os.uptime() in the guest read 1446400.69 s while the
  * host's kern.boottime put boot 1446398 s before `date`, and
  * clock_gettime(CLOCK_MONOTONIC) on the host read 1446398 -- so this is
- * time-since-host-boot, which is what uptime means. linux.c reads /proc/uptime
- * (not served here) and falls back to CLOCK_BOOTTIME, which wasix-libc does not
+ * time-since-host-boot, which is what uptime means. The E65 runtime now serves
+ * /proc/uptime (which linux.c reads first); MEASURED on the E65 binary it reads
+ * from the same clock (file 1476580.53, os.uptime() 1476580.54 a moment later),
+ * so there is nothing to reconcile and the call stays on the clock itself,
+ * which also works on the current pin and in the browser where the file is
+ * absent. linux.c's own fallback is CLOCK_BOOTTIME, which wasix-libc does not
  * define; on a Linux host CLOCK_MONOTONIC stops across suspend where
  * CLOCK_BOOTTIME does not, so there the figure can read low by the suspended
  * time. It is a measured clock, never a constant.
@@ -168,15 +238,16 @@ int uv_uptime(double* uptime) {
  *   /proc/stat      one `cpuN user nice sys idle iowait irq ...` line per CPU
  *                   -> the CPU list and cpu_times (jiffies at 100 Hz, so *10 for
  *                   ms). linux.c returns UV__ERR(errno) when it cannot open it.
- *                   MEASURED 2026-10-04: the runtime serves /proc/cpuinfo and
- *                   /proc/meminfo but NOT /proc/stat (proc_files.rs
- *                   install_proc_files), so today this returns UV_ENOENT, as
- *                   Linux libuv does on a system without /proc/stat -- and
- *                   Node's os.cpus() turns that into `[]`
- *                   (`getCPUs() || []`). The earlier version here returned one
- *                   entry per sysconf CPU with all-zero times, which is data
- *                   nothing measured. The parse below lights up on its own the
- *                   day the runtime serves /proc/stat.
+ *                   Where the runtime serves none (the current pin
+ *                   serves /proc/cpuinfo and /proc/meminfo but NOT /proc/stat)
+ *                   this returns UV_ENOENT, as Linux libuv does on a system
+ *                   without /proc/stat, and Node's os.cpus() turns that into
+ *                   `[]` (`getCPUs() || []`). The earlier version here
+ *                   returned one entry per sysconf CPU with all-zero times,
+ *                   which is data nothing measured. MEASURED 2026-10-04 on the
+ *                   E65 runtime (which serves /proc/stat): 10 entries ==
+ *                   os.availableParallelism(), model "Apple M1 Max" from
+ *                   cpuinfo, non-zero times (cpu0 user 836361940 ms).
  *   /proc/cpuinfo   `processor : N` blocks; model is the `model name` field
  *                   (the generic x86 marker linux.c uses where no per-arch
  *                   marker applies; the runtime renders `model name` for every
