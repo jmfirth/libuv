@@ -505,9 +505,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
   # TCP_NODELAY/SO_KEEPALIVE option families, socketpair) — all of which
   # the Firebox sysroot exports. tcp.c also references getifaddrs /
   # freeifaddrs for the IPv6 link-local scope-id lookup; wasix-libc
-  # ships the header but no symbol export, so wasi-bootstrap.c stubs
-  # them to errno=ENOSYS / no-op (uv__ipv6_link_local_scope_id falls
-  # through to rv=0 cleanly). The uv_tcp_* / uv__tcp_* / uv_socketpair
+  # defines both since firebox#YZN, so wasi-bootstrap.c no longer stubs
+  # them (uv__ipv6_link_local_scope_id falls through to rv=0 cleanly
+  # when the host has no interface list). The uv_tcp_* / uv__tcp_* / uv_socketpair
   # stubs were removed from wasi-bootstrap.c so there is no
   # duplicate-symbol clash at link.
   #
@@ -533,14 +533,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
   # (which is why async.c had to land first at #438).
   #
   # getaddrinfo.c also defines uv_if_indextoname / uv_if_indextoiid,
-  # which call libc's if_indextoname. wasix-libc declares
-  # if_indextoname / if_nametoindex in <net/if.h> but does NOT export
-  # the symbols (no .o for either in libc.a; verified via llvm-nm).
-  # wasi-bootstrap.c stubs both to errno=ENOSYS so uv_if_indextoname
-  # falls through to UV__ERR(errno) cleanly. The v1 DNS path (Node's
-  # net + dns wrappers, Edge.js's npm-install uv_getaddrinfo flow)
-  # never exercises this — it's needed only by os.networkInterfaces(),
-  # which is not on the cascade-9 critical path.
+  # which call libc's if_indextoname. wasix-libc defines if_indextoname /
+  # if_nametoindex since firebox#25D (real names and indices; ENXIO /
+  # ENODEV on a miss), so wasi-bootstrap.c no longer stubs them
+  # (firebox#17D): a second definition is a duplicate-symbol link error
+  # against libc.a.
   #
   # This unblocks cascade-9 §13.5: npm needs to resolve
   # registry.npmjs.org before it can connect(), and Node's dns_wrap.cc

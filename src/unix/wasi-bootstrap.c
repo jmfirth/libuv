@@ -58,15 +58,11 @@
  *     defines both since firebox#YZN (67b8cbd9), and a second definition
  *     is a duplicate-symbol link error against libc.a. See the note below.
  *
- *   - if_indextoname / if_nametoindex. wasix-libc ships the <net/if.h>
- *     header declarations but does NOT export the symbols (firebox#592
- *     audit; no .o for either in libc.a). getaddrinfo.c references
- *     if_indextoname from uv_if_indextoname; stub to return NULL +
- *     errno=ENOSYS so uv_if_indextoname falls through to UV__ERR(errno).
- *     The v1 DNS path (uv_getaddrinfo from Node's dns_wrap.cc / Edge.js
- *     npm install) does NOT exercise this — it's only needed by the
- *     network-interface enumeration surface, which Node exposes via
- *     os.networkInterfaces() and isn't on the cascade-9 critical path.
+ *   - if_indextoname / if_nametoindex are NOT stubbed here any more:
+ *     wasix-libc defines both since firebox#25D (real names and indices
+ *     from the host interface list; ENXIO / ENODEV on a miss), and a second
+ *     definition is a duplicate-symbol link error against libc.a
+ *     (firebox#17D). See the note below.
  *
  * What this file NO LONGER stubs (firebox#438):
  *
@@ -181,10 +177,9 @@
  *         which is NOT in the WASI source list — there is no
  *         __wasi_resolve-reverse host import yet. uv_getnameinfo
  *         remains stubbed below.
- *       - if_indextoname / if_nametoindex (the underlying libc
- *         primitives, declared in <net/if.h> but unexported by wasix-
- *         libc) — stubbed below to errno=ENOSYS so uv_if_indextoname
- *         propagates UV_ENOSYS via UV__ERR(errno).
+ *       - (if_indextoname / if_nametoindex, the libc primitives
+ *         uv_if_indextoname calls, are real in wasix-libc since
+ *         firebox#25D and are no longer stubbed here -- firebox#17D.)
  *
  *   - Process title. WASI has no argv modification ABI; title ops
  *     are tracked in the common uv-common.c layer but need the
@@ -206,7 +201,6 @@
 #include <stdlib.h> /* abort */
 #include <string.h> /* memset */
 #include <signal.h>
-#include <net/if.h>  /* if_indextoname / if_nametoindex stubs (see block) */
 
 /* ========================================================================
  * Process title / threadpool cleanup
@@ -379,9 +373,9 @@ int uv__pthread_sigmask(int how, const sigset_t* set, sigset_t* oset) {
  *     which is NOT in the WASI source list. No __wasi_resolve-reverse
  *     host import yet. uv_getnameinfo remains stubbed (see the "DNS
  *     surface / interface_addresses" block below).
- *   - if_indextoname / if_nametoindex (the underlying libc primitives,
- *     declared in <net/if.h> but unexported by wasix-libc) — stubbed
- *     below to ENOSYS so uv_if_indextoname propagates that errno.
+ *   - (if_indextoname / if_nametoindex, the libc primitives
+ *     uv_if_indextoname calls, are provided by wasix-libc -- see the
+ *     "provided by wasix-libc (firebox#17D)" block below.)
  * ======================================================================== */
 
 
@@ -411,38 +405,21 @@ void uv__poll_close(uv_poll_t* handle) {
 
 
 /* ========================================================================
- * if_indextoname / if_nametoindex — wasix-libc header-only (firebox#592
- * audit)
+ * if_indextoname / if_nametoindex — provided by wasix-libc (firebox#17D)
  *
- * getaddrinfo.c's uv_if_indextoname calls if_indextoname to map an
- * interface index to its kernel name (e.g. "eth0"). wasix-libc declares
- * both prototypes in <net/if.h> but does NOT export the symbols (no .o
- * for either in libc.a; verified via llvm-nm). Stub both to fail with
- * errno=ENOSYS so uv_if_indextoname falls through to UV__ERR(errno),
- * which surfaces UV_ENOSYS to the libuv user.
- *
- * The v1 DNS path (Node's net + dns wrappers, Edge.js's npm-install
- * uv_getaddrinfo flow) never exercises this — it's needed only by the
- * network-interface enumeration surface (os.networkInterfaces() in
- * Node), which is not on the cascade-9 critical path.
- *
- * Replacing these with real interface enumeration is wireup work for a
- * follow-up: the wasix-libc interface-enumeration ABI is not yet
- * specified.
+ * This file used to stub both to errno=ENOSYS (firebox#592: the <net/if.h>
+ * prototypes existed, the symbols did not). wasix-libc defines them since
+ * firebox#25D, over the same host interface list as getifaddrs: real
+ * names and indices, if_indextoname fails with ENXIO and if_nametoindex
+ * with ENODEV on a miss (POSIX / Linux), and both fail with ENOTSUP where
+ * the host has no interface model (no --net; the browser). The stubs are
+ * removed rather than kept because a second strong definition is a
+ * duplicate-symbol link error against libc.a -- every edgejs fat link
+ * failed on it -- and a libuv that shadowed libc would keep answering
+ * ENOSYS to uv_if_indextoname after the host gained a real list.
+ * uv_if_indextoname (getaddrinfo.c) maps whatever errno libc reports
+ * through UV__ERR.
  * ======================================================================== */
-
-char* if_indextoname(unsigned int ifindex, char* ifname) {
-  (void) ifindex; (void) ifname;
-  errno = ENOSYS;
-  return NULL;
-}
-
-
-unsigned int if_nametoindex(const char* ifname) {
-  (void) ifname;
-  errno = ENOSYS;
-  return 0;
-}
 
 
 /* uv__fs_copy_file_range: Linux-only fast-path used by uv_fs_copyfile.
