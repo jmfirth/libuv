@@ -554,11 +554,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
     src/unix/core.c
     src/unix/fs.c
     src/unix/getaddrinfo.c
+    src/unix/getnameinfo.c
     src/unix/loop.c
     src/unix/loop-watcher.c
     src/unix/no-fsevents.c
     src/unix/no-proctitle.c
     src/unix/pipe.c
+    src/unix/poll.c
     src/unix/posix-hrtime.c
     src/unix/posix-poll.c
     src/unix/process.c
@@ -567,6 +569,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
     src/unix/tcp.c
     src/unix/thread.c
     src/unix/tty.c
+    src/unix/udp.c
     src/unix/wasi.c
     src/unix/wasi-bootstrap.c)
 endif()

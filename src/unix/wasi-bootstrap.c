@@ -28,17 +28,12 @@
  *
  * What we stub in this file:
  *
- *   - UDP (uv_udp_open / close). Out-of-scope for v1.
+ *   - (UDP is NOT stubbed any more: src/unix/udp.c is in the source list,
+ *     firebox#46C.)
  *
- *   - Polling on non-fd-non-socket handles (uv_poll_init_socket /
- *     uv_poll_start / uv_poll_stop). Out-of-scope for v1; TCP fds
- *     poll via posix-poll.c directly.
- *
- *   - uv_getnameinfo (reverse DNS — sockaddr → host string). Out-of-
- *     scope for v1; needs a future wasix-libc/host-import wireup for
- *     the reverse path. (firebox#592 wires forward DNS via
- *     uv_getaddrinfo + getaddrinfo.c — see "What this file NO LONGER
- *     stubs" block below.)
+ *   - (uv_poll_* and uv_getnameinfo are NOT stubbed any more: src/unix/poll.c
+ *     and src/unix/getnameinfo.c are in the source list, firebox#46C. Edge's
+ *     c-ares wrap needs the first, dns.lookupService the second.)
  *
  *   - Dynamic linking (uv_dlopen / dlerror / dlsym / dlclose). firebox#759
  *     re-points these onto wasix-libc's dlopen/dlsym (<dlfcn.h>), which
@@ -48,9 +43,8 @@
  *     syscall yields NULL → a normal dlerror() string. See the uv_dl*
  *     block below.
  *
- *   - pthread_atfork / pthread_sigmask. Firebox-specific helper symbols
- *     supplied as trivial no-ops (no fork-time pthread re-init hook;
- *     signal masks handled at the WASIX layer).
+ *   - (uv__pthread_atfork / uv__pthread_sigmask, always-0 no-ops with no
+ *     caller anywhere in the tree, were removed: firebox#46C audit.)
  *
  *   - uv__fs_poll_close (so stat-polling fs watchers don't undef).
  *
@@ -173,10 +167,8 @@
  *     getaddrinfo.c at link.
  *
  *     NOT wired by this entry:
- *       - uv_getnameinfo (reverse DNS) lives in src/unix/getnameinfo.c,
- *         which is NOT in the WASI source list — there is no
- *         __wasi_resolve-reverse host import yet. uv_getnameinfo
- *         remains stubbed below.
+ *       - (uv_getnameinfo: wired by firebox#46C, getnameinfo.c over libc's
+ *         getnameinfo.)
  *       - (if_indextoname / if_nametoindex, the libc primitives
  *         uv_if_indextoname calls, are real in wasix-libc since
  *         firebox#25D and are no longer stubbed here -- firebox#17D.)
@@ -214,20 +206,10 @@
 
 
 /* ========================================================================
- * UDP
+ * UDP -- REAL (firebox#46C): src/unix/udp.c is in the WASI source list.
+ * The uv_udp_* / uv__udp_* ENOSYS stubs that stood here were removed; a
+ * second definition would clash with udp.c at link.
  * ======================================================================== */
-
-int uv_udp_open(uv_udp_t* handle, uv_os_sock_t sock) {
-  return UV_ENOSYS;
-}
-
-
-void uv__udp_close(uv_udp_t* handle) {
-}
-
-
-void uv__udp_finish_close(uv_udp_t* handle) {
-}
 
 
 /* ========================================================================
@@ -269,28 +251,6 @@ void uv__udp_finish_close(uv_udp_t* handle) {
  * sysroot). npm-cli.js startup triggers this the first time it issues
  * an async libuv primitive (e.g. uv_fs_open).
  * ======================================================================== */
-
-
-/* ========================================================================
- * pthread trampolines
- *
- * uv__pthread_atfork / uv__pthread_sigmask are Firebox-specific helper
- * symbols (referenced by the WASI-gated paths in core.c / process.c).
- * They are NOT provided by src/unix/thread.c, so they stay here. The
- * single-threaded no-op shape is still correct for the WASI port: there
- * is no fork-time pthread re-init hook to run, and signal masks are
- * handled at the WASIX layer.
- * ======================================================================== */
-
-int uv__pthread_atfork(void (*prepare)(void), void (*parent)(void),
-                       void (*child)(void)) {
-  return 0;
-}
-
-
-int uv__pthread_sigmask(int how, const sigset_t* set, sigset_t* oset) {
-  return 0;
-}
 
 
 /* ========================================================================
@@ -369,10 +329,7 @@ int uv__pthread_sigmask(int how, const sigset_t* set, sigset_t* oset) {
  * with getaddrinfo.c at link.
  *
  * NOT wired by this block:
- *   - uv_getnameinfo (reverse DNS) — lives in src/unix/getnameinfo.c,
- *     which is NOT in the WASI source list. No __wasi_resolve-reverse
- *     host import yet. uv_getnameinfo remains stubbed (see the "DNS
- *     surface / interface_addresses" block below).
+ *   - (uv_getnameinfo: wired by firebox#46C, getnameinfo.c.)
  *   - (if_indextoname / if_nametoindex, the libc primitives
  *     uv_if_indextoname calls, are provided by wasix-libc -- see the
  *     "provided by wasix-libc (firebox#17D)" block below.)
@@ -380,14 +337,9 @@ int uv__pthread_sigmask(int how, const sigset_t* set, sigset_t* oset) {
 
 
 /* ========================================================================
- * poll — uv__poll_close is the only piece needed for the dead-stream-close
- * path; full uv_poll_* surface still stubbed (see public-stubs block
- * below).
+ * poll -- REAL (firebox#46C): src/unix/poll.c is in the WASI source list over
+ * posix-poll.c; uv__poll_close and uv_poll_* are no longer stubbed here.
  * ======================================================================== */
-
-void uv__poll_close(uv_poll_t* handle) {
-  (void) handle;
-}
 
 
 /* ========================================================================
@@ -438,203 +390,6 @@ ssize_t uv__fs_copy_file_range(int fd_in, off_t* off_in,
   return -1;
 }
 #endif
-
-
-/* ========================================================================
- * Public uv_udp_/uv_poll_ surface
- *
- * Edge.js (`wasmerio/edgejs`, firebox#366 Mechanism α) compiles a wider
- * surface than our v1 CMake-bootstrap scope: Node's dns_wrap.cc
- * references `uv_getaddrinfo` / `uv_getnameinfo`; the UDP wrap
- * references `uv_udp_*` set-methods; the dynamic-loader binding
- * references `uv_dl*`. Our CMake source list deliberately omits
- * udp.c / poll.c / dl.c / getaddrinfo.c — all of which expand to dead
- * paths since wasm32-wasi has no real datagram-socket/dlopen
- * primitives behind them. But the symbol references in Edge.js's
- * static-link still need resolution.
- *
- * (Note: tcp.c is now IN the WASI source list as of firebox#582 — see
- * the preamble and the "TCP / uv_socketpair — REAL implementations"
- * note above. The corresponding uv_tcp_* stubs that used to live here
- * have been removed; tcp.c is the one canonical home for that symbol
- * surface now.)
- *
- * All stubs return UV_ENOSYS and set errno. JS callers see the
- * standard "ENOSYS"/"not implemented" error path Node already has for
- * other unsupported platforms. uv_get_*_memory and uv_loadavg/uv_uptime
- * are in src/unix/wasi.c (real per-platform-utility location); these
- * are the cross-link stubs only.
- * ======================================================================== */
-
-/* -- uv_udp_* (public + a few internal helpers) -- */
-
-int uv_udp_getsockname(const uv_udp_t* handle,
-                       struct sockaddr* name,
-                       int* namelen) {
-  (void) handle; (void) name; (void) namelen;
-  return UV_ENOSYS;
-}
-
-
-int uv_udp_getpeername(const uv_udp_t* handle,
-                       struct sockaddr* name,
-                       int* namelen) {
-  (void) handle; (void) name; (void) namelen;
-  return UV_ENOSYS;
-}
-
-
-int uv_udp_set_membership(uv_udp_t* handle,
-                          const char* multicast_addr,
-                          const char* interface_addr,
-                          uv_membership membership) {
-  (void) handle; (void) multicast_addr;
-  (void) interface_addr; (void) membership;
-  return UV_ENOSYS;
-}
-
-
-int uv_udp_set_source_membership(uv_udp_t* handle,
-                                 const char* multicast_addr,
-                                 const char* interface_addr,
-                                 const char* source_addr,
-                                 uv_membership membership) {
-  (void) handle; (void) multicast_addr; (void) interface_addr;
-  (void) source_addr; (void) membership;
-  return UV_ENOSYS;
-}
-
-
-int uv_udp_set_multicast_loop(uv_udp_t* handle, int on) {
-  (void) handle; (void) on;
-  return UV_ENOSYS;
-}
-
-
-int uv_udp_set_multicast_ttl(uv_udp_t* handle, int ttl) {
-  (void) handle; (void) ttl;
-  return UV_ENOSYS;
-}
-
-
-int uv_udp_set_multicast_interface(uv_udp_t* handle,
-                                   const char* interface_addr) {
-  (void) handle; (void) interface_addr;
-  return UV_ENOSYS;
-}
-
-
-int uv_udp_set_broadcast(uv_udp_t* handle, int on) {
-  (void) handle; (void) on;
-  return UV_ENOSYS;
-}
-
-
-int uv_udp_set_ttl(uv_udp_t* handle, int ttl) {
-  (void) handle; (void) ttl;
-  return UV_ENOSYS;
-}
-
-
-int uv__udp_init_ex(uv_loop_t* loop,
-                    uv_udp_t* handle,
-                    unsigned int flags,
-                    int domain) {
-  (void) loop; (void) handle; (void) flags; (void) domain;
-  return UV_ENOSYS;
-}
-
-
-int uv__udp_bind(uv_udp_t* handle,
-                 const struct sockaddr* addr,
-                 unsigned int addrlen,
-                 unsigned int flags) {
-  (void) handle; (void) addr; (void) addrlen; (void) flags;
-  return UV_ENOSYS;
-}
-
-
-int uv__udp_connect(uv_udp_t* handle,
-                    const struct sockaddr* addr,
-                    unsigned int addrlen) {
-  (void) handle; (void) addr; (void) addrlen;
-  return UV_ENOSYS;
-}
-
-
-int uv__udp_disconnect(uv_udp_t* handle) {
-  (void) handle;
-  return UV_ENOSYS;
-}
-
-
-int uv__udp_send(uv_udp_send_t* req,
-                 uv_udp_t* handle,
-                 const uv_buf_t bufs[],
-                 unsigned int nbufs,
-                 const struct sockaddr* addr,
-                 unsigned int addrlen,
-                 uv_udp_send_cb send_cb) {
-  (void) req; (void) handle; (void) bufs; (void) nbufs;
-  (void) addr; (void) addrlen; (void) send_cb;
-  return UV_ENOSYS;
-}
-
-
-int uv__udp_try_send(uv_udp_t* handle,
-                     const uv_buf_t bufs[],
-                     unsigned int nbufs,
-                     const struct sockaddr* addr,
-                     unsigned int addrlen) {
-  (void) handle; (void) bufs; (void) nbufs; (void) addr; (void) addrlen;
-  return UV_ENOSYS;
-}
-
-
-int uv__udp_try_send2(uv_udp_t* handle,
-                      unsigned int count,
-                      uv_buf_t* bufs[/*count*/],
-                      unsigned int nbufs[/*count*/],
-                      struct sockaddr* addrs[/*count*/]) {
-  (void) handle; (void) count; (void) bufs; (void) nbufs; (void) addrs;
-  return UV_ENOSYS;
-}
-
-
-int uv__udp_recv_start(uv_udp_t* handle,
-                       uv_alloc_cb alloc_cb,
-                       uv_udp_recv_cb recv_cb) {
-  (void) handle; (void) alloc_cb; (void) recv_cb;
-  return UV_ENOSYS;
-}
-
-
-int uv__udp_recv_stop(uv_udp_t* handle) {
-  (void) handle;
-  return 0;
-}
-
-
-/* -- uv_poll_* (public) -- */
-
-int uv_poll_init_socket(uv_loop_t* loop,
-                        uv_poll_t* handle,
-                        uv_os_sock_t socket) {
-  (void) loop; (void) handle; (void) socket;
-  return UV_ENOSYS;
-}
-
-
-int uv_poll_start(uv_poll_t* handle, int events, uv_poll_cb cb) {
-  (void) handle; (void) events; (void) cb;
-  return UV_ENOSYS;
-}
-
-
-int uv_poll_stop(uv_poll_t* handle) {
-  (void) handle;
-  return UV_ENOSYS;
-}
 
 
 /* -- uv_sem_* — REAL implementations live in src/unix/thread.c
@@ -739,24 +494,6 @@ static int uv__dlerror(uv_lib_t* lib) {
  * getaddrinfo.c at link.
  */
 
-int uv_getnameinfo(uv_loop_t* loop,
-                   uv_getnameinfo_t* req,
-                   uv_getnameinfo_cb getnameinfo_cb,
-                   const struct sockaddr* addr,
-                   int flags) {
-  (void) loop; (void) req; (void) getnameinfo_cb;
-  (void) addr; (void) flags;
-  return UV_ENOSYS;
-}
 
-
-int uv_interface_addresses(uv_interface_address_t** addresses, int* count) {
-  if (addresses != NULL) *addresses = NULL;
-  if (count != NULL) *count = 0;
-  return UV_ENOSYS;
-}
-
-
-void uv_free_interface_addresses(uv_interface_address_t* addresses, int count) {
-  (void) addresses; (void) count;
-}
+/* uv_interface_addresses / uv_free_interface_addresses are real: see src/unix/wasi.c
+ * (firebox#46C). They were ENOSYS stubs here. */
